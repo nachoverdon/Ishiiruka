@@ -31,21 +31,18 @@ private:
 
 	void OnDualCoreCheckBoxChanged(wxCommandEvent&);
 	void OnCheatCheckBoxChanged(wxCommandEvent&);
+	void OnBootDefaultCheckBoxChanged(wxCommandEvent &);
 	void OnForceNTSCJCheckBoxChanged(wxCommandEvent&);
 	void OnThrottlerChoiceChanged(wxCommandEvent&);
 	void OnCPUEngineRadioBoxChanged(wxCommandEvent&);
-	void OnAnalyticsCheckBoxChanged(wxCommandEvent&);
-	void OnAnalyticsNewIdButtonClick(wxCommandEvent&);
 
 	wxArrayString m_throttler_array_string;
 	wxArrayString m_cpu_engine_array_string;
 
 	wxCheckBox* m_dual_core_checkbox;
 	wxCheckBox* m_cheats_checkbox;
+	wxCheckBox* m_boot_default_iso_checkbox;
 	wxCheckBox* m_force_ntscj_checkbox;
-
-	wxCheckBox* m_analytics_checkbox;
-	wxButton* m_analytics_new_id;
 
 	wxChoice* m_throttler_choice;
 

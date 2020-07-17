@@ -18,7 +18,7 @@
 #include "Common/CommonTypes.h"
 #include "Common/Event.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-#include "Core/SlippiTimer.h"
+#include "Core/Slippi/SlippiTimer.h"
 #include "DolphinWX/Globals.h"
 #include "DolphinWX/PlaybackSlider.h"
 #include "InputCommon/GCPadStatus.h"
@@ -93,6 +93,9 @@ public:
 
 	void DoPause();
 	void DoStop();
+	void DoExit();
+	void RaiseRenderWindow();
+	void LowerRenderWindow();
 	bool TriggerSTMPowerEvent();
 	void OnStopped();
 	void DoRecordingSave();
@@ -176,9 +179,9 @@ private:
 
 	wxTimer m_poll_hotkey_timer;
 	wxTimer m_handle_signal_timer;
-	slippiTimer *m_slippi_timer;
-	PlaybackSlider *seekBar = nullptr;
-	wxStaticText *seekBarText = nullptr;
+	std::unique_ptr<SlippiTimer> m_slippi_timer;
+	PlaybackSlider* seekBar;
+	wxStaticText* seekBarText;
 
 	wxMenuBar* m_menubar_shadow = nullptr;
 
@@ -297,6 +300,7 @@ private:
 	void OnToggleToolbar(wxCommandEvent& event);
 	void DoToggleToolbar(bool);
 	void OnToggleStatusbar(wxCommandEvent& event);
+	void OnToggleSeekbar(wxCommandEvent &event);
 	void OnToggleWindow(wxCommandEvent& event);
 
 	void OnKeyDown(wxKeyEvent& event);  // Keyboard

@@ -97,7 +97,7 @@ NetPlayServer::NetPlayServer(const u16 port, bool traversal, const std::string& 
 		is_connected = true;
 		m_do_loop = true;
 		m_thread = std::thread(&NetPlayServer::ThreadFunc, this);
-		m_minimum_buffer_size = 6;
+		m_minimum_buffer_size = 8;
 	}
 }
 
@@ -558,6 +558,27 @@ unsigned int NetPlayServer::OnData(sf::Packet& packet, Client& player)
 		spac << msg;
 
 		SendToClients(spac, player.pid);
+	}
+	break;
+
+	case NP_MSG_PAD_SPECTATOR:
+	{
+		bool spectator;
+		packet >> spectator;
+		auto padmap = this->GetPadMapping();
+		for (int i = 0; i < padmap.size(); i++)
+		{
+			if (spectator && padmap[i] == player.pid)
+			{
+				padmap[i] = -1;
+			}
+			else if (!spectator && padmap[i] == -1)
+			{
+				padmap[i] = player.pid;
+				break;
+			}
+		}
+		this->SetPadMapping(padmap);
 	}
 	break;
 

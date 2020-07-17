@@ -760,7 +760,28 @@
     <ClCompile Include="Slippi\SlippiReplayComm.cpp">
       <Filter>Slippi</Filter>
     </ClCompile>
-    <ClCompile Include="SlippiTimer.cpp">
+    <ClCompile Include="Slippi\SlippiPad.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiSavestate.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiMatchmaking.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiNetplay.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiGameFileLoader.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiUser.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiPlayback.cpp">
+      <Filter>Slippi</Filter>
+    </ClCompile>
+    <ClCompile Include="Slippi\SlippiTimer.cpp">
       <Filter>Slippi</Filter>
     </ClCompile>
     <ClCompile Include="..\DolphinWX\PlaybackSlider.cpp">
@@ -1304,13 +1325,31 @@
     <ClInclude Include="Slippi\SlippiReplayComm.h">
       <Filter>Slippi</Filter>
     </ClInclude>
-    <ClInclude Include="SlippiPlayback.h">
-      <Filter>HW %28Flipper/Hollywood%29\EXI - Expansion Interface</Filter>
-    </ClInclude>
-    <ClInclude Include="SlippiTimer.h">
+    <ClInclude Include="Slippi\SlippiPad.h">
       <Filter>Slippi</Filter>
     </ClInclude>
-    <ClInclude Include="..\DolphinWX\PlaybackSlider.h">
+    <ClInclude Include="Slippi\SlippiSavestate.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiMatchmaking.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiNetplay.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiGameFileLoader.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiUser.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiTimer.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="PlaybackSlider.h">
+      <Filter>Slippi</Filter>
+    </ClInclude>
+    <ClInclude Include="Slippi\SlippiPlayback.h">
       <Filter>Slippi</Filter>
     </ClInclude>
   </ItemGroup>

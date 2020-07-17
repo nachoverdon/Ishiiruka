@@ -59,6 +59,7 @@ enum
 	F_MEMORYWATCHERLOCATIONS_IDX,
 	F_MEMORYWATCHERSOCKET_IDX,
 	F_WIISDCARD_IDX,
+	F_USERJSON_IDX,
 	NUM_PATH_INDICES
 };
 
@@ -157,6 +158,8 @@ std::string GetBundleDirectory();
 #endif
 
 std::string& GetExeDirectory();
+
+std::string GetHomeDirectory();
 
 bool WriteStringToFile(const std::string& str, const std::string& filename);
 bool ReadFileToString(const std::string& filename, std::string& str);

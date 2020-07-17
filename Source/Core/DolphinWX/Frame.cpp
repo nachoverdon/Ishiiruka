@@ -71,8 +71,8 @@
 #include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/VideoConfig.h"
 
-#include "SlippiPlayback/SlippiPlayback.h"
-extern std::unique_ptr<SlippiPlaybackStatus> g_playback_status;
+#include "Core/Slippi/SlippiPlayback.h"
+extern std::unique_ptr<SlippiPlaybackStatus> g_playbackStatus;
 
 #if defined(HAVE_X11) && HAVE_X11
 // X11Utils nastiness that's only used here
@@ -349,8 +349,16 @@ CFrame::CFrame(wxFrame *parent, wxWindowID id, const wxString &title, wxRect geo
 	// This panel is the parent for rendering and it holds the gamelistctrl
 	m_Panel = new wxPanel(this, IDM_MPANEL, wxDefaultPosition, wxDefaultSize, 0);
 
+	// macOS dark mode with a sunken border produces a striking white border around 
+	// the game list. wxSIMPLE_BORDER looks fine in both macOS light/dark mode.
+#ifdef __WXOSX__
+	long game_list_style = wxLC_REPORT | wxSIMPLE_BORDER | wxLC_ALIGN_LEFT; 
+#else
+	long game_list_style = wxLC_REPORT | wxSUNKEN_BORDER | wxLC_ALIGN_LEFT;
+#endif
+
 	m_GameListCtrl = new CGameListCtrl(m_Panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-	                                   wxLC_REPORT | wxSUNKEN_BORDER | wxLC_ALIGN_LEFT);
+										game_list_style);
 	m_GameListCtrl->Bind(wxEVT_LIST_ITEM_ACTIVATED, &CFrame::OnGameListCtrlItemActivated, this);
 
 	wxBoxSizer *sizerPanel = new wxBoxSizer(wxHORIZONTAL);
@@ -379,6 +387,7 @@ CFrame::CFrame(wxFrame *parent, wxWindowID id, const wxString &title, wxRect geo
 		                                          .CloseButton(true)
 		                                          .Hide());
 
+#ifdef IS_PLAYBACK
 	if (!g_pCodeWindow) {
 		// Create UI for Slippi playback controls, hide until replay is booted
 		wxPanel *slippiPanel = new wxPanel(this, wxID_ANY);
@@ -403,7 +412,7 @@ CFrame::CFrame(wxFrame *parent, wxWindowID id, const wxString &title, wxRect geo
 										.Floatable(false)
 										.Hide());
 	}
-
+#endif
 	AuiFullscreen = m_Mgr->SavePerspective();
 
 	if (!SConfig::GetInstance().m_InterfaceToolbar)
@@ -1280,8 +1289,14 @@ void CFrame::ParseHotkeys()
 	if (IsHotkey(HK_FULLSCREEN))
 		DoFullscreen(!RendererIsFullscreen());
 	// Pause and Unpause
-	if (IsHotkey(HK_PLAY_PAUSE) || IsHotkey(HK_TOGGLE_PLAY_PAUSE))
+	if (IsHotkey(HK_PLAY_PAUSE))
 		DoPause();
+
+#ifdef IS_PLAYBACK
+	// Slippi Playback Pause/Unpause
+	if (g_playbackStatus && g_playbackStatus->inSlippiPlayback && IsHotkey(HK_TOGGLE_PLAY_PAUSE))
+		DoPause();
+#endif
 	// Frame advance
 	HandleFrameSkipHotkeys();
 	// Stop
@@ -1600,24 +1615,31 @@ void CFrame::ParseHotkeys()
 		State::UndoLoadState();
 	if (IsHotkey(HK_UNDO_SAVE_STATE))
 		State::UndoSaveState();
-
+#ifdef IS_PLAYBACK
 	// Slippi replay hotkeys and setup
-	if (g_playback_status && g_playback_status->inSlippiPlayback)
+	if (SConfig::GetInstance().m_InterfaceSeekbar && g_playbackStatus && g_playbackStatus->inSlippiPlayback)
 	{		
 		if (IsHotkey(HK_JUMP_BACK))
-			g_playback_status->shouldJumpBack = true;
+			g_playbackStatus->shouldJumpBack = true;
 
 		if (IsHotkey(HK_JUMP_FORWARD))
-			g_playback_status->shouldJumpForward = true;
+			g_playbackStatus->shouldJumpForward = true;
 
-		if (!m_Mgr->GetPane(_("Slippi Pane")).IsShown()) {
+		if (!m_Mgr->GetPane(_("Slippi Pane")).IsShown()) 
+		{
 			m_Mgr->GetPane(_("Slippi Pane")).Show();
 			m_Mgr->Update();
 
-			m_slippi_timer = new slippiTimer(this, seekBar, seekBarText);
+			m_slippi_timer = std::make_unique<SlippiTimer>(this, seekBar, seekBarText);
 			m_slippi_timer->Start(50); 
 		}
+	} 
+	else if (m_Mgr->GetPane(_("Slippi Pane")).IsShown())
+	{
+		m_Mgr->GetPane(_("Slippi Pane")).Hide();
+		m_Mgr->Update();
 	}
+#endif
 }
 
 void CFrame::HandleFrameSkipHotkeys()

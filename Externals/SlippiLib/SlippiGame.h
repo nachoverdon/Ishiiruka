@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <iostream>
 #include <fstream>
+#include <memory>
 
 namespace Slippi {
   const uint8_t EVENT_SPLIT_MESSAGE = 0x10;
@@ -21,11 +22,12 @@ namespace Slippi {
   const uint8_t UCF_TOGGLE_SIZE = 8;
   const uint8_t NAMETAG_SIZE = 8;
   const int32_t GAME_FIRST_FRAME = -123;
+  const int32_t PLAYBACK_FIRST_SAVE = -122;
   const uint8_t GAME_SHEIK_INTERNAL_ID = 0x7;
   const uint8_t GAME_SHEIK_EXTERNAL_ID = 0x13;
 
   const uint32_t SPLIT_MESSAGE_INTERNAL_DATA_LEN = 512;
-	
+
   static uint8_t* data;
 
   typedef struct {
@@ -60,8 +62,9 @@ namespace Slippi {
     uint8_t joystickXRaw;
   } PlayerFrameData;
 
-  typedef struct {
+  typedef struct FrameData {
     int32_t frame;
+    uint32_t numSinceStart;
     bool randomSeedExists = false;
     uint32_t randomSeed;
     bool inputsFullyFetched = false;
@@ -89,9 +92,10 @@ namespace Slippi {
     std::vector<uint8_t> geckoCodes;
   } GameSettings;
 
-  typedef struct {
+  typedef struct Game {
     std::array<uint8_t, 4> version;
-    std::unordered_map<int32_t, FrameData> frameData;
+    std::unordered_map<int32_t, FrameData*> framesByIndex;
+    std::vector<std::unique_ptr<FrameData>> frames;
     GameSettings settings;
     bool areSettingsLoaded = false;
 
@@ -114,18 +118,19 @@ namespace Slippi {
   class SlippiGame
   {
   public:
-    static SlippiGame* FromFile(std::string path);
+    static std::unique_ptr<SlippiGame> FromFile(std::string path);
     bool AreSettingsLoaded();
     bool DoesFrameExist(int32_t frame);
-	std::array<uint8_t, 4> GetVersion();
+    std::array<uint8_t, 4> GetVersion();
     FrameData* GetFrame(int32_t frame);
-    int32_t GetFrameCount();
+    FrameData* GetFrameAt(uint32_t pos);
+    int32_t GetLatestIndex();
     GameSettings* GetSettings();
     bool DoesPlayerExist(int8_t port);
     bool IsProcessingComplete();
   private:
-    Game* game;
-    std::ifstream* file;
+    std::unique_ptr<Game> game;
+    std::unique_ptr<std::ifstream> file;
     std::vector<uint8_t> rawData;
     std::string path;
     std::ofstream log;

@@ -4,6 +4,9 @@
 cmake_minimum_required(VERSION 2.8.8)
 project(dolphin-emu)
 
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 option(USE_EGL "Enables EGL OpenGL Interface" OFF)
 option(TRY_X11 "Enables X11 Support" ON)
 option(USE_SHARED_ENET "Use shared libenet if found rather than Dolphin's soon-to-compatibly-diverge version" OFF)
@@ -28,7 +31,10 @@ option(ENABLE_BLUEZ "Enables bluetooth support" ON)
 #    launch).
 #  * The Dolphin team relies on the data in order to understand the behavior
 #    of our software in the wild.
-option(ENABLE_ANALYTICS "Enables opt-in Analytics collection" ON)
+option(ENABLE_ANALYTICS "Enables opt-in Analytics collection" OFF)
+
+# Playback builds for Slippi include some extra UI tweaks
+option(IS_PLAYBACK "Enable Playback changes" OFF)
 
 # Name of the Dolphin distributor. If you redistribute Dolphin builds (forks,
 # unofficial builds) please consider identifying your distribution with a
@@ -48,6 +54,8 @@ endif()
 
 if(APPLE)
 	option(OSX_USE_DEFAULT_SEARCH_PATH "Don't prioritize system library paths" OFF)
+	set(CMAKE_FIND_FRAMEWORK LAST)
+	set(CMAKE_FIND_APPBUNDLE LAST)
 endif()
 
 option(ENCODE_FRAMEDUMPS "Encode framedumps in AVI format" ON)
@@ -296,7 +304,7 @@ if(APPLE)
 	# Note that the SDK determines the maximum version of which optional
 	# features can be used, not the minimum required version to run.
 	set(OSX_MIN_VERSION "10.9")
-	set(CMAKE_OSX_SYSROOT "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.11.sdk")
+	set(CMAKE_OSX_SYSROOT "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.14.sdk")
 	set(TARGET_FLAGS "${TARGET_FLAGS} -mmacosx-version-min=${OSX_MIN_VERSION}")
 	# Do not warn about frameworks that are not available on all architectures.
 	# This avoids a warning when linking with QuickTime.
@@ -639,6 +647,11 @@ if(ENABLE_ANALYTICS)
 	add_definitions(-DUSE_ANALYTICS=1)
 endif()
 
+if(IS_PLAYBACK)
+	message("Enabling Playback changes")
+	add_definitions(-DIS_PLAYBACK)
+endif()
+
 ########################################
 # Setup include directories (and make sure they are preferred over the Externals)
 #
@@ -665,6 +678,8 @@ add_subdirectory(Externals/glslang)
 add_subdirectory(Externals/SlippiLib)
 include_directories(Externals/SlippiLib)
 include_directories(Externals/nlohmann)
+add_subdirectory(Externals/semver)
+include_directories(Externals/semver/include)
 
 add_subdirectory(Externals/open-vcdiff)
 include_directories(Externals/open-vcdiff)

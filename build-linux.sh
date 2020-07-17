@@ -1,20 +1,26 @@
 #!/bin/bash -e
-# build-linux.sh - simple script for invoking CMake
-# Note that this will destroy any local configuration in build/Binaries/.
+# build-linux.sh
 
-if [ -e "build/" ]; then 
-	rm -rf build/
-	mkdir build
-else
-	mkdir build
+CMAKE_FLAGS='-DLINUX_LOCAL_DEV=true'
+
+# Build type
+if [ -z "$1" ]
+    then
+        echo "Using Netplay build config"
+elif [ "$1" == "playback" ]
+    then
+        CMAKE_FLAGS+=" -DIS_PLAYBACK=true"
+        echo "Using Playback build config"
 fi
 
+# Move into the build directory, run CMake, and compile the project
+mkdir -p build
 pushd build
-cmake -DLINUX_LOCAL_DEV=true ../
-#cmake -DLINUX_LOCAL_DEV=true -DFASTLOG=true../
-#cmake -DCMAKE_BUILD_TYPE=Debug -DLINUX_LOCAL_DEV=true ../
-make -j7
+cmake ${CMAKE_FLAGS} ../
+make -j$(nproc)
 popd
 
-touch build/Binaries/portable.txt
-cp -R Overwrite/* build/Binaries/
+# Copy the Sys folder in
+cp -r -n Data/Sys/ build/Binaries/
+
+touch ./build/Binaries/portable.txt

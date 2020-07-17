@@ -43,7 +43,7 @@ enum
 
 enum
 {
-	INITIAL_PAD_BUFFER_SIZE = 6
+	INITIAL_PAD_BUFFER_SIZE = 8
 };
 
 enum class ChatMessageType
@@ -110,6 +110,8 @@ public:
 	static void FillWithGameNames(wxListBox* game_lbox, const CGameListCtrl& game_list);
 
 	bool IsRecording() override;
+	bool IsSpectating() override;
+	void SetSpectating(bool spectating) override;
 
 private:
 	void CreateGUI();
@@ -143,11 +145,14 @@ private:
     bool Is20XX();
     bool IsPALMelee();
 
+	void OnSpectatorToggle(wxCommandEvent& event);
+
 	wxListBox* m_player_lbox;
 	wxTextCtrl* m_chat_text;
 	wxTextCtrl* m_chat_msg_text;
 	wxCheckBox* m_memcard_write;
 	wxCheckBox* m_record_chkbox;
+	wxCheckBox* m_spec_chkbox;
     wxChoice* m_lag_reduction_choice;
     wxCheckBox* m_widescreen_force_chkbox;
 

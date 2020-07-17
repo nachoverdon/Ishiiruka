@@ -39,6 +39,9 @@
 #include "Core/Host.h"
 #include "Core/Movie.h"
 
+#include "Core/GeckoCode.h"
+#include "Core/GeckoCodeConfig.h"
+
 #include "DolphinWX/Debugger/CodeWindow.h"
 #include "DolphinWX/Debugger/JitWindow.h"
 #include "DolphinWX/Frame.h"
@@ -133,6 +136,11 @@ bool DolphinApp::OnInit()
 	else
 		SConfig::GetInstance().m_strSlippiInput = "Slippi/playback.txt";
 
+	if (m_hide_seekbar) // Hide seekbar if necessary by cmd line (mostly for external recording applications)
+	{
+		m_prev_seekbar = SConfig::GetInstance().m_InterfaceSeekbar;
+		SConfig::GetInstance().m_InterfaceSeekbar = false;
+	}
 
 	if (m_select_audio_emulation)
 		SConfig::GetInstance().bDSPHLE = (m_audio_emulation_name.Upper() == "HLE");
@@ -188,7 +196,8 @@ bool DolphinApp::OnInit()
 					}
 				}
 
-				wxMessageBox("Translocation from the application bundle couldn't be removed.\nSome things might not work correctly.\nAsk in #support for further help.", "An error occured", wxOK | wxCENTRE | wxICON_WARNING);
+				wxMessageBox("This app is quarantined! Move it to your Applications folder and reopen it.\nAsk in the Discord (#macos-support) for further help.", "An error occured", wxOK | wxCENTRE | wxICON_WARNING);
+				exit(EXIT_SUCCESS);
 			}
 		}
 
@@ -233,6 +242,8 @@ void DolphinApp::OnInitCmdLine(wxCmdLineParser& parser)
 			wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL},
 			{wxCMD_LINE_OPTION, "a", "audio_emulation", "Low level (LLE) or high level (HLE) audio",
 			 wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL},
+			{wxCMD_LINE_SWITCH, "hs", "hide-seekbar", "Hide seekbar during playback", wxCMD_LINE_VAL_NONE,
+			 wxCMD_LINE_PARAM_OPTIONAL},
 			{wxCMD_LINE_OPTION, "m", "movie", "Play a movie file", wxCMD_LINE_VAL_STRING,
 			 wxCMD_LINE_PARAM_OPTIONAL},
 			{wxCMD_LINE_OPTION, "u", "user", "User folder path", wxCMD_LINE_VAL_STRING,
@@ -296,6 +307,7 @@ bool DolphinApp::OnCmdLineParsed(wxCmdLineParser& parser)
 	m_select_video_backend = parser.Found("video_backend", &m_video_backend_name);
 	m_select_audio_emulation = parser.Found("audio_emulation", &m_audio_emulation_name);
 	m_select_slippi_input = parser.Found("slippi-input", &m_slippi_input_name);
+	m_hide_seekbar = parser.Found("hide-seekbar");
 	m_play_movie = parser.Found("movie", &m_movie_file);
 	parser.Found("user", &m_user_path);
 
@@ -316,7 +328,7 @@ void DolphinApp::AfterInit()
 	if (!m_batch_mode)
 		main_frame->UpdateGameList();
 
-	if (!SConfig::GetInstance().m_analytics_permission_asked)
+	if (SConfig::GetInstance().m_analytics_will_prompt && !SConfig::GetInstance().m_analytics_permission_asked)
 	{
 		int answer =
 			wxMessageBox(_("If authorized, Dolphin can collect data on its performance, "
@@ -339,6 +351,24 @@ void DolphinApp::AfterInit()
 		DolphinAnalytics::Instance()->ReloadConfig();
 	}
 
+#ifdef _WIN32
+	// delete the VC notice file since the user has successfully started Dolphin.
+	std::string vc_notice_path = File::GetExeDirectory() + DIR_SEP + "FIX-VCRUNTIME140-ERROR.txt";
+	File::Delete(vc_notice_path);
+#endif
+
+	// Get a list of user INIs that we might have to create
+	std::vector<std::string> meleeIniFiles;
+	std::vector<std::string> newFiles;
+	std::string user_path = File::GetUserPath(D_GAMESETTINGS_IDX);
+	meleeIniFiles.push_back(user_path + "GALE01r2.ini");
+	meleeIniFiles.push_back(user_path + "GALJ01r2.ini");
+	for (const std::string &filename : meleeIniFiles) {
+		if (!File::Exists(filename)) {
+			newFiles.push_back(filename);
+		}
+	}
+
 	if (m_confirm_stop)
 	{
 		if (m_confirm_setting.Upper() == "TRUE")
@@ -354,6 +384,12 @@ void DolphinApp::AfterInit()
 			if (m_load_file && !m_file_to_load.empty())
 			{
 				main_frame->BootGame(WxStrToStr(m_file_to_load));
+				main_frame->RaiseRenderWindow();
+			}
+			else if (SConfig::GetInstance().bBootDefaultISO && !SConfig::GetInstance().m_strDefaultISO.empty())
+			{
+				main_frame->BootGame(WxStrToStr(SConfig::GetInstance().m_strDefaultISO));
+				main_frame->RaiseRenderWindow();
 			}
 			else
 			{
@@ -365,6 +401,12 @@ void DolphinApp::AfterInit()
 	else if (m_load_file && !m_file_to_load.empty())
 	{
 		main_frame->BootGame(WxStrToStr(m_file_to_load));
+		main_frame->RaiseRenderWindow();
+	}
+	else if (SConfig::GetInstance().bBootDefaultISO && !SConfig::GetInstance().m_strDefaultISO.empty())
+	{
+		main_frame->BootGame(WxStrToStr(SConfig::GetInstance().m_strDefaultISO));
+		main_frame->RaiseRenderWindow();
 	}
 	// If we have selected Automatic Start, start the default ISO,
 	// or if no default ISO exists, start the last loaded ISO
@@ -441,6 +483,10 @@ void DolphinApp::OnEndSession(wxCloseEvent& event)
 
 int DolphinApp::OnExit()
 {
+	if (m_hide_seekbar) // retain the seekbar setting from before cmd line switch
+	{
+		SConfig::GetInstance().m_InterfaceSeekbar = m_prev_seekbar;
+	}
 	Core::Shutdown();
 	UICommon::Shutdown();
 
