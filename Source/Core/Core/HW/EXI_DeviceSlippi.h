@@ -174,6 +174,9 @@ class CEXISlippi : public IEXIDevice
 
 	void FileWriteThread(void);
 
+	// Get connect code from the clipboard
+	std::string getConnectCodeFromCliboard();
+
 	Common::FifoQueue<std::unique_ptr<WriteMessage>, false> fileWriteQueue;
 	bool writeThreadRunning = false;
 	std::thread m_fileWriteThread;

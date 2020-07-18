@@ -31,6 +31,7 @@
 // Not clean but idk a better way atm
 #include "DolphinWX/Frame.h"
 #include "DolphinWX/Main.h"
+#include <wx\clipbrd.h>
 
 #define FRAME_INTERVAL 900
 #define SLEEP_TIME_MS 8
@@ -1680,10 +1681,22 @@ void CEXISlippi::startFindMatch(u8 *payload)
 	// Store this search so we know what was queued for
 	lastSearch = search;
 
+	auto directMode = SlippiMatchmaking::OnlinePlayMode::DIRECT;
+
+	// If its direct mode and the opponet's connect code doesn't have a hash "#",
+	// try to use the connect code from the clipboard
+	// Note: The hash character from the game is not equal to the common hash character.
+	if (search.mode == directMode)
+	{
+		auto connectCodeFromClipboard = getConnectCodeFromCliboard();
+		
+		if (!connectCodeFromClipboard.empty())
+			search.connectCode = connectCodeFromClipboard;
+	}
+
 	// While we do have another condition that checks characters after being connected, it's nice to give
 	// someone an early error before they even queue so that they wont enter the queue and make someone
 	// else get force removed from queue and have to requeue
-	auto directMode = SlippiMatchmaking::OnlinePlayMode::DIRECT;
 	if (search.mode != directMode && localSelections.characterId >= 26)
 	{
 		forcedError = "The character you selected is not allowed in this mode";
@@ -2124,6 +2137,34 @@ void CEXISlippi::handleConnectionCleanup()
 #endif
 
 	ERROR_LOG(SLIPPI_ONLINE, "Connection cleanup completed...");
+}
+
+// Send tag from clipboard to the game if it matches the criteria
+std::string CEXISlippi::getConnectCodeFromCliboard()
+{
+	if (!wxTheClipboard->Open())
+		return "";
+
+	std::string connectCode;
+	auto clipboardData = new wxTextDataObject();
+
+	wxTheClipboard->GetData(*clipboardData);
+
+	// Convert to upper case
+	connectCode = clipboardData->GetText().MakeUpper();
+	wxTheClipboard->Close();
+
+	// Trim spaces and get the first 8 characters
+	connectCode = StripSpaces(connectCode).substr(0, 8);
+
+	// Check that it contains the hash symbol "#" and that the part before the hash has at least 2 characters
+	if (connectCode.find("#") < 2)
+		return "";
+
+	// Finally, convert the code to a string the game can handle before sending it the info
+	connectCode = ConvertStringForGame(connectCode, CONNECT_CODE_LENGTH);
+
+	return connectCode;
 }
 
 void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
