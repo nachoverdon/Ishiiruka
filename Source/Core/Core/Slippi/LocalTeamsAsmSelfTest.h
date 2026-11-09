@@ -598,17 +598,29 @@ void Run(const std::string& directory, std::ofstream& report)
       }
     }
     report << "PASS: all four mode-entry/gameplay source ports and real hand/token port labels, preserving card ownership and team colors\n";
+    // Keyboard confirmation can leave an A edge on the frame CSS resumes.
+    // The saved first-game pick must agree with the menu's team for rematches.
+    for (bool native : {false, true})
     for (bool own : {false, true})
+    for (unsigned player = 0; player < 4; ++player)
+    for (unsigned phase : {0u, 1u, 2u, 5u})
+    for (unsigned keyboard : {0u, 4u, 5u})
+    for (unsigned confirmed : {0u, 1u << player, 15u ^ (1u << player)})
     {
-      Runner team(nativeTeam); team.Status(2,0);
-      Memory::Write_U8(1, Runner::Css + nativeTeam.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+      Runner team(nativeTeam); team.Status(4,0,phase);
+      const auto status = Runner::Css + nativeTeam.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+      Memory::Write_U8(u8(native), status + 9);
+      Memory::Write_U8(u8(confirmed), status + 4);
+      Memory::Write_U8(u8(keyboard), Runner::R13 - 0x49AA);
       PowerPC::ppcState.gpr[31]=Runner::Buffer;
-      Memory::Write_U8(1, Runner::Buffer+4);
-      PowerPC::ppcState.gpr[25]=0x803F0DFC + (own ? 36 : 0);
+      Memory::Write_U8(u8(player), Runner::Buffer+4);
+      PowerPC::ppcState.gpr[25]=0x803F0DFC + 36 * (own ? player : (player + 1) % 4);
       const auto end = Elf::Base + u32(nativeTeam.text.size());
-      Require(team.Run(Elf::Base,{end,0x80261BFC}) == (own ? end : 0x80261BFC), "native cursor changed another player's team");
+      const bool editable = !native || (own && phase == 0 && keyboard == 0 && !(confirmed & (1u << player)));
+      Require(team.Run(Elf::Base,{end,0x80261BFC}) == (editable ? end : 0x80261BFC),
+              "team button accepted a keyboard/locked-player click or blocked an editable selection");
     }
-    report << "PASS: actual native pad remap 1/3, Start masking, unused cursors and team ownership\n";
+    report << "PASS: native team buttons reject keyboard, search and ready clicks; unready players retain their own team controls\n";
     auto writeFloat = [](float value, u32 address) { u32 bits; std::memcpy(&bits,&value,4); Memory::Write_U32(bits,address); };
     auto readFloat = [](u32 address) { const auto bits=Memory::Read_U32(address); float value; std::memcpy(&value,&bits,4); return value; };
     for(unsigned count : {1u,2u,3u,4u})

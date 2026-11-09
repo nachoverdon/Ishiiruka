@@ -10,7 +10,7 @@ v143 and Windows SDK 10.0.26100.0, Git, and stable Rust with the
 ```rust
 git clone --branch dubs --recurse-submodules https://github.com/STCDR/Ishiiruka.git Ishiiruka
 git clone --branch dubs https://github.com/STCDR/slippi-ssbm-asm.git slippi-ssbm-asm
-git -C slippi-ssbm-asm checkout 7845aabdd806af6b6c0779b8e60c73f26888c735
+git -C slippi-ssbm-asm checkout f5a44c64c8b5b1ea46d40feb35ca8dcf37c3aa24
 ```
 
 Put Gecko 5.0.0's `gecko.exe`, `powerpc-eabi-as.exe` and
