@@ -1301,13 +1301,12 @@ void CEXISlippi::handleOnlineInputs(u8 *payload, const u8* physicalReports)
 		if (slippi_netplay)
 			slippi_netplay->StartSlippiGame();
 
-		// TODO(local-teams): startInputSuggestions currently only tracks a single local player/port.
-		startInputSuggestions(delay, inputSourcePort);
 		if (localTeams->Active())
 		{
 			localTeams->StartGame();
 			localTeamsGameInitialized = true;
 		}
+		startInputSuggestions(delay, inputSourcePort);
 	}
 
 	// The local player chose to leave, which ends the game for us the same way as losing the connection. The other
@@ -1344,6 +1343,8 @@ void CEXISlippi::handleOnlineInputs(u8 *payload, const u8* physicalReports)
 	// the signals
 	handleMatchQuality(frame, skip == OnlineFrameSkip::STALL);
 
+	std::array<LocalTeams::Pad, 3> guestPads{};
+	bool guestSkipped = shouldSkip;
 	if (localTeams->Active())
 	{
 		if (!physicalReports)
@@ -1351,7 +1352,8 @@ void CEXISlippi::handleOnlineInputs(u8 *payload, const u8* physicalReports)
 			m_read_queue.push_back(3);
 			return;
 		}
-		localTeams->SendInputs(frame, delay, finalizedFrame, finalizedFrameChecksum, physicalReports, shouldSkip);
+		localTeams->SendInputs(frame, delay, finalizedFrame, finalizedFrameChecksum, physicalReports, shouldSkip,
+		                       &guestPads, &guestSkipped);
 	}
 	if (shouldSkip)
 	{
@@ -1368,7 +1370,15 @@ void CEXISlippi::handleOnlineInputs(u8 *payload, const u8* physicalReports)
 	// the opponent inputs
 	bool isAdvancing = prepareOpponentInputs(frame, shouldSkip);
 
-	reportInputSuggestionsFrame(frame, shouldSkip, isAdvancing, inputSourcePort, inputs);
+	reportInputSuggestionsFrame(slippi_netplay.get(), frame, shouldSkip, isAdvancing, inputSourcePort, inputs);
+	if (localTeams->Active())
+	{
+		for (unsigned i = 1; i < localTeams->state.count; ++i)
+		{
+			reportInputSuggestionsFrame(localTeams->GuestNetplay(i), frame, guestSkipped, isAdvancing,
+			                            static_cast<u8>(localTeams->state.ports[i]), guestPads[i - 1].data());
+		}
+	}
 }
 
 void CEXISlippi::startInputSuggestions(u8 delay, u8 inputSourcePort)
@@ -1385,36 +1395,60 @@ void CEXISlippi::startInputSuggestions(u8 delay, u8 inputSourcePort)
 	game.local_player_idx = matchmaking->LocalPlayerIndex();
 	game.remote_player_count = matchmaking->RemotePlayerCount();
 	game.delay = delay;
-	game.source_port = inputSourcePort;
-	game.source_is_adapter =
-	    inputSourcePort < MAX_SI_CHANNELS && SerialInterface::GetDeviceType(inputSourcePort) == SIDEVICE_WIIU_ADAPTER;
+
+	auto addLocalPlayer = [&](u8 playerIdx, u8 port) {
+		if (game.local_player_count >= 4)
+			return;
+		auto &entry = game.local_players[game.local_player_count++];
+		entry.player_idx = playerIdx;
+		entry.source_port = port;
+		entry.source_is_adapter =
+		    port < MAX_SI_CHANNELS && SerialInterface::GetDeviceType(port) == SIDEVICE_WIIU_ADAPTER;
+	};
+
+	const u8 primaryPlayerIdx =
+	    slippi_netplay ? slippi_netplay->LocalPlayerPort() : static_cast<u8>(matchmaking->LocalPlayerIndex());
+	addLocalPlayer(primaryPlayerIdx, inputSourcePort);
+	if (localTeams->Active())
+	{
+		for (unsigned i = 1; i < localTeams->state.count; ++i)
+		{
+			if (auto *guestNetplay = localTeams->GuestNetplay(i))
+				addLocalPlayer(guestNetplay->LocalPlayerPort(), static_cast<u8>(localTeams->state.ports[i]));
+		}
+	}
+
 	slprs_input_suggestions_start_game(game);
 }
 
 // Tells input suggestions how many times the game has polled the controller, what it sent for this frame and
 // whether it is advancing a frame. This lets it work out which frame the next adapter reports belong to.
-void CEXISlippi::reportInputSuggestionsFrame(s32 frame, bool isSkip, bool isAdvancing, u8 inputSourcePort,
-                                             u8 *inputs)
+void CEXISlippi::reportInputSuggestionsFrame(SlippiNetplayClient *client, s32 frame, bool isSkip, bool isAdvancing,
+                                             u8 sourcePort, const u8 *inputs)
 {
+	if (!client)
+		return;
+
 	SlippiInputSuggestionsLocalFrame info = {};
+	info.player_idx = client->LocalPlayerPort();
 	info.frame = frame;
 	info.is_skip = isSkip;
 	info.is_advancing = isAdvancing;
 
-	if (inputSourcePort < MAX_SI_CHANNELS)
+	if (sourcePort < MAX_SI_CHANNELS)
 	{
 		info.has_poll = true;
-		info.poll_count = GCAdapter::GetGamePollCount(inputSourcePort);
+		info.poll_count = GCAdapter::GetGamePollCount(sourcePort);
 
-		info.has_origin = SerialInterface::GetGCControllerOrigin(inputSourcePort, info.origin, &info.analog_mode);
+		info.has_origin = SerialInterface::GetGCControllerOrigin(sourcePort, info.origin, &info.analog_mode);
 	}
 
 	static_assert(sizeof(info.sent_pad) == SLIPPI_PAD_INPUT_SIZE, "sent_pad should hold the inputs");
 	std::copy(inputs, inputs + SLIPPI_PAD_INPUT_SIZE, info.sent_pad);
 
 	SlippiInputSuggestion suggestion = slprs_input_suggestions_on_local_frame(info);
-	if (suggestion.is_valid && slippi_netplay)
-		slippi_netplay->SendSlippiPadSuggestion(suggestion.target_frame, suggestion.seq, suggestion.pad);
+	if (suggestion.is_valid)
+		client->SendSlippiPadSuggestion(suggestion.target_frame, suggestion.seq, suggestion.pad);
 }
 
 // Reports every pass through the online frame handler to the match quality tracker, which judges the match from
@@ -2213,6 +2247,8 @@ void CEXISlippi::prepareOnlineMatchState()
 #else
 			slippi_netplay = matchmaking->GetNetplayClient();
 #endif
+			if (slippi_netplay)
+				slippi_netplay->SetReceiveInputSuggestions(true);
 
 			// This happens on the initial connection to a player. The matchmaking object is ephemeral, it
 			// gets re-created when a connection is terminated, that said, it can still be useful to know
@@ -3131,6 +3167,7 @@ void doConnectionCleanup(std::unique_ptr<SlippiMatchmaking> mm, std::unique_ptr<
 void CEXISlippi::handleConnectionCleanup()
 {
 	ERROR_LOG(SLIPPI_ONLINE, "Connection cleanup started...");
+	slprs_input_suggestions_end_game();
 
 	if (localTeams->Active())
   {
@@ -3554,7 +3591,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       confirmLocalTeams(&memPtr[bufLoc + 1]);
       break;
     case CMD_LOCAL_TEAMS_INPUTS:
-      handleOnlineInputs(&memPtr[bufLoc + 1], &memPtr[bufLoc + 26]);
+      handleOnlineInputs(&memPtr[bufLoc + 1], &memPtr[bufLoc + 28]);
       break;
     case CMD_LOCAL_TEAMS_COUNT:
       changeLocalTeamsCount(&memPtr[bufLoc + 1]);

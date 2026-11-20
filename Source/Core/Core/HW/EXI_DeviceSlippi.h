@@ -255,7 +255,8 @@ class CEXISlippi : public IEXIDevice
 	bool prepareOpponentInputs(s32 frame, bool shouldSkip);
 	void handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs);
 	void startInputSuggestions(u8 delay, u8 inputSourcePort);
-	void reportInputSuggestionsFrame(s32 frame, bool isSkip, bool isAdvancing, u8 inputSourcePort, u8 *inputs);
+	void reportInputSuggestionsFrame(SlippiNetplayClient *client, s32 frame, bool isSkip, bool isAdvancing,
+	                                 u8 sourcePort, const u8 *inputs);
 	void handleCaptureSavestate(u8 *payload);
 	void handleLoadSavestate(u8 *payload);
 	void handleNameEntryLoad(u8 *payload);

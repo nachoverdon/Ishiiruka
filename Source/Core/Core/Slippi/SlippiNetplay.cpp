@@ -45,22 +45,35 @@ static constexpr size_t SLIPPI_GAME_PREP_STEP_QUEUE_MAX = 32;
 SlippiNetplayClient *SLIPPI_NETPLAY = nullptr;
 std::atomic<unsigned> SLIPPI_NETPLAY_CLIENT_COUNT{0};
 
-// The adapter read thread sends input suggestions through the live client. The pointer is set and
+// The adapter read thread sends input suggestions through the live clients. The pointers are set and
 // cleared under this mutex so the adapter thread never uses a client that has started tearing down.
 static std::mutex s_suggestion_sink_mutex;
-static SlippiNetplayClient *s_suggestion_sink = nullptr;
+static std::array<SlippiNetplayClient *, SLIPPI_PLAYER_COUNT_MAX> s_suggestion_sinks{};
 
 // called from ---ADAPTER READ--- thread
 static void SendInputSuggestionForAdapterReport(const GCAdapter::AdapterReport &report)
 {
 	std::lock_guard<std::mutex> lk(s_suggestion_sink_mutex);
-	if (!s_suggestion_sink)
+	bool anySink = false;
+	for (auto *sink : s_suggestion_sinks)
+	{
+		if (sink)
+		{
+			anySink = true;
+			break;
+		}
+	}
+	if (!anySink)
 		return;
 
-	SlippiInputSuggestion suggestion = slprs_input_suggestions_on_adapter_report(
+	SlippiInputSuggestionBatch batch = slprs_input_suggestions_on_adapter_report(
 	    report.game_poll_counts, report.payload, sizeof(report.payload));
-	if (suggestion.is_valid)
-		s_suggestion_sink->SendSlippiPadSuggestion(suggestion.target_frame, suggestion.seq, suggestion.pad);
+	for (u8 i = 0; i < batch.count && i < SLIPPI_PLAYER_COUNT_MAX; i++)
+	{
+		const auto &s = batch.suggestions[i];
+		if (s.is_valid && s.player_idx < SLIPPI_PLAYER_COUNT_MAX && s_suggestion_sinks[s.player_idx])
+			s_suggestion_sinks[s.player_idx]->SendSlippiPadSuggestion(s.target_frame, s.seq, s.pad);
+	}
 }
 
 // called from ---GUI--- thread
@@ -68,8 +81,8 @@ SlippiNetplayClient::~SlippiNetplayClient()
 {
 	{
 		std::lock_guard<std::mutex> lk(s_suggestion_sink_mutex);
-		if (s_suggestion_sink == this)
-			s_suggestion_sink = nullptr;
+		if (playerIdx < SLIPPI_PLAYER_COUNT_MAX && s_suggestion_sinks[playerIdx] == this)
+			s_suggestion_sinks[playerIdx] = nullptr;
 	}
 
 	m_do_loop.Clear();
@@ -190,7 +203,8 @@ SlippiNetplayClient::SlippiNetplayClient(std::vector<std::string> addrs, std::ve
 	GCAdapter::SetReportCallback(SendInputSuggestionForAdapterReport);
 	{
 		std::lock_guard<std::mutex> lk(s_suggestion_sink_mutex);
-		s_suggestion_sink = this;
+		if (playerIdx < SLIPPI_PLAYER_COUNT_MAX)
+			s_suggestion_sinks[playerIdx] = this;
 	}
 }
 
@@ -405,6 +419,7 @@ unsigned int SlippiNetplayClient::OnData(sf::Packet &packet, ENetPeer *peer)
 		}
 
 		// Let input suggestions check their predictions against the real inputs
+		if (m_receiveInputSuggestions.load(std::memory_order_acquire))
 		{
 			auto packetData = (const u8 *)packet.getData();
 			for (s64 i = inputsToCopy - 1; i >= 0; i--)
@@ -519,8 +534,11 @@ unsigned int SlippiNetplayClient::OnData(sf::Packet &packet, ENetPeer *peer)
 			break;
 		}
 
-		auto packetData = (const u8 *)packet.getData();
-		slprs_input_suggestions_on_remote_suggestion(pIdx, targetFrame, seq, &packetData[padDataOffset]);
+		if (m_receiveInputSuggestions.load(std::memory_order_acquire))
+		{
+			auto packetData = (const u8 *)packet.getData();
+			slprs_input_suggestions_on_remote_suggestion(pIdx, targetFrame, seq, &packetData[padDataOffset]);
+		}
 	}
 	break;
 
@@ -605,7 +623,8 @@ unsigned int SlippiNetplayClient::OnData(sf::Packet &packet, ENetPeer *peer)
 				remotePadQueue[idx].clear();
 				remotePadHistory[idx].clear();
 			}
-			slprs_input_suggestions_reset_remote(idx);
+			if (m_receiveInputSuggestions.load(std::memory_order_acquire))
+				slprs_input_suggestions_reset_remote(idx);
 		}
 	}
 	break;
@@ -1514,6 +1533,11 @@ void SlippiNetplayClient::SendSlippiPad(std::unique_ptr<SlippiPad> pad)
 		sendTime.timeUs = time;
 		ackTimers[i].Push(sendTime);
 	}
+}
+
+void SlippiNetplayClient::SetReceiveInputSuggestions(bool receive)
+{
+	m_receiveInputSuggestions.store(receive, std::memory_order_release);
 }
 
 // Sends the newest local input between frames so opponents can predict with it. Called from the CPU thread

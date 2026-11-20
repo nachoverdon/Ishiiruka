@@ -203,6 +203,7 @@ class SlippiNetplayClient
 	void SendConnectionSelected();
 	void SendSlippiPad(std::unique_ptr<SlippiPad> pad);
 	void SendSlippiPadSuggestion(s32 targetFrame, u32 seq, const u8 *pad);
+	void SetReceiveInputSuggestions(bool receive);
 	void SetMatchSelections(SlippiPlayerSelections &s);
 	void SendGamePrepStep(SlippiGamePrepStepResults &s);
 	void SendSyncedGameState(SlippiSyncedGameState &s);
@@ -249,6 +250,7 @@ class SlippiNetplayClient
 	Common::Flag m_is_running{false};
 	Common::Flag m_do_loop{true};
   std::atomic<bool> m_immediateShutdown{false};
+	std::atomic<bool> m_receiveInputSuggestions{false};
 
 	unsigned int m_minimum_buffer_size = 6;
 

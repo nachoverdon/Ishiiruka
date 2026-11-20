@@ -19,7 +19,9 @@ public:
   void PublishSelections(SlippiNetplayClient& primary);
   bool AllReady(SlippiNetplayClient& primary);
   void StartGame();
-  void SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip);
+  void SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip,
+                  std::array<LocalTeams::Pad, 3>* sentPads = nullptr, bool* wasSkipped = nullptr);
+  SlippiNetplayClient* GuestNetplay(unsigned index) const;
   void Cleanup();
   void RequestStop();
   bool LobbyDisconnected() const { return lobbyDisconnected; }

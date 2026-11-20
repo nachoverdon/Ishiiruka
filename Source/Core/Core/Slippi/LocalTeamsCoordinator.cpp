@@ -391,20 +391,41 @@ void LocalTeamsCoordinator::StartGame()
   { guests[i - 1].previous.fill(0); guests[i - 1].netplay->StartSlippiGame(); }
 }
 
-void LocalTeamsCoordinator::SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip)
+SlippiNetplayClient* LocalTeamsCoordinator::GuestNetplay(unsigned index) const
 {
-  if (!Active() || state.phase != LocalTeams::Phase::InGame) return;
+  return (index >= 1 && index < state.count) ? guests[index - 1].netplay.get() : nullptr;
+}
+
+void LocalTeamsCoordinator::SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip,
+                                       std::array<LocalTeams::Pad, 3>* sentPads, bool* wasSkipped)
+{
+  if (!Active() || state.phase != LocalTeams::Phase::InGame)
+  {
+    if (wasSkipped) *wasSkipped = true;
+    return;
+  }
   if (!skip && !state.AcceptFrame(frame)) skip = true;
+  if (wasSkipped) *wasSkipped = skip;
   for (unsigned i = 1; i < state.count; ++i)
   {
     auto& guest = guests[i - 1];
     guest.netplay->DropOldRemoteInputs(finalized);
-    if (skip) { guest.netplay->SendSlippiPad(nullptr); continue; }
-    if (frame == 1)
-      for (s32 initial = 1; initial <= delay; ++initial) guest.netplay->SendSlippiPad(std::make_unique<SlippiPad>(initial));
     LocalTeams::Pad pad{};
     std::copy_n(reports + 12 * state.ports[i], 12, pad.begin());
+    if (skip)
+    {
+      if (sentPads)
+      {
+        LocalTeams::Pad prevCopy = guest.previous;
+        (*sentPads)[i - 1] = LocalTeams::NormalizePad(pad, prevCopy);
+      }
+      guest.netplay->SendSlippiPad(nullptr);
+      continue;
+    }
+    if (frame == 1)
+      for (s32 initial = 1; initial <= delay; ++initial) guest.netplay->SendSlippiPad(std::make_unique<SlippiPad>(initial));
     pad = LocalTeams::NormalizePad(pad, guest.previous);
+    if (sentPads) (*sentPads)[i - 1] = pad;
     guest.netplay->SendSlippiPad(std::make_unique<SlippiPad>(frame + delay, finalized, checksum, pad.data()));
   }
 }
