@@ -22,6 +22,7 @@ public:
   void SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip,
                   std::array<LocalTeams::Pad, 3>* sentPads = nullptr, bool* wasSkipped = nullptr);
   SlippiNetplayClient* GuestNetplay(unsigned index) const;
+  void FillRumblePorts(std::array<u8, 4>& slotToPortPlusOne) const;
   void Cleanup();
   void RequestStop();
   bool LobbyDisconnected() const { return lobbyDisconnected; }

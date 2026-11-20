@@ -2845,6 +2845,12 @@ void CEXISlippi::prepareOnlineMatchState()
 	{
 		m_read_queue.push_back(static_cast<u8>(i < playerInfo.size() && playerInfo[i].isBot));
 	}
+
+	// Map each Melee slot (0..3) to physical controller port + 1 for local players, or 0 for remote players
+	std::array<u8, 4> localRumblePorts{};
+	if (localTeams->Active())
+		localTeams->FillRumblePorts(localRumblePorts);
+	m_read_queue.insert(m_read_queue.end(), localRumblePorts.begin(), localRumblePorts.end());
 }
 
 u16 CEXISlippi::getRandomStage()

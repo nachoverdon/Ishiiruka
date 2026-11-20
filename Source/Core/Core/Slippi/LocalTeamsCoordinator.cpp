@@ -396,6 +396,18 @@ SlippiNetplayClient* LocalTeamsCoordinator::GuestNetplay(unsigned index) const
   return (index >= 1 && index < state.count) ? guests[index - 1].netplay.get() : nullptr;
 }
 
+void LocalTeamsCoordinator::FillRumblePorts(std::array<u8, 4>& slotToPortPlusOne) const
+{
+  slotToPortPlusOne.fill(0);
+  if (!Active() || !validated)
+    return;
+  for (unsigned i = 0; i < state.count; ++i)
+  {
+    if (localSlots[i] < 4 && state.ports[i] < 4)
+      slotToPortPlusOne[localSlots[i]] = static_cast<u8>(state.ports[i] + 1);
+  }
+}
+
 void LocalTeamsCoordinator::SendInputs(s32 frame, u8 delay, s32 finalized, u32 checksum, const u8* reports, bool skip,
                                        std::array<LocalTeams::Pad, 3>* sentPads, bool* wasSkipped)
 {
