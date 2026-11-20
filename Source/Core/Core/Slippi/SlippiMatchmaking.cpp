@@ -26,11 +26,13 @@ enum RustMmState
 	RUST_MM_FAILED = 4,
 };
 
-SlippiMatchmaking::SlippiMatchmaking(uintptr_t rs_exi_device_ptr, SlippiUser *user)
+SlippiMatchmaking::SlippiMatchmaking(uintptr_t rs_exi_device_ptr, SlippiUser *user, u16 localPort, const SlippiUser::UserInfo* identity)
 {
 	m_user = user;
+  m_forcedLocalPort = localPort;
+  if (identity) m_identity = std::make_unique<SlippiUser::UserInfo>(*identity);
 	m_state = ProcessState::IDLE;
-	m_errorMsg = "";
+	SetError("");
 
 	slprs_exi_device_ptr = rs_exi_device_ptr;
 
@@ -41,14 +43,19 @@ SlippiMatchmaking::SlippiMatchmaking(uintptr_t rs_exi_device_ptr, SlippiUser *us
 
 SlippiMatchmaking::~SlippiMatchmaking()
 {
-	isMmTerminated = true;
-	m_state = ProcessState::ERROR_ENCOUNTERED;
-	m_errorMsg = "Matchmaking shut down";
+  RequestStop();
+	SetError("Matchmaking shut down");
 
 	if (m_matchmakeThread.joinable())
 		m_matchmakeThread.join();
 
 	terminateMmConnection();
+}
+
+void SlippiMatchmaking::RequestStop()
+{
+  isMmTerminated = true;
+  m_state = ProcessState::ERROR_ENCOUNTERED;
 }
 
 void SlippiMatchmaking::FindMatch(MatchSearchSettings settings)
@@ -57,24 +64,33 @@ void SlippiMatchmaking::FindMatch(MatchSearchSettings settings)
 
 	m_searchSettings = settings;
 
-	m_errorMsg = "";
+	SetError("");
 	m_state = ProcessState::INITIALIZING;
 	m_matchmakeThread = std::thread(&SlippiMatchmaking::MatchmakeThread, this);
 }
 
 SlippiMatchmaking::ProcessState SlippiMatchmaking::GetMatchmakeState()
 {
+  if (m_localTeamsLoopback && m_state == ProcessState::OPPONENT_CONNECTING && m_netplayClient)
+  {
+    const auto status = m_netplayClient->GetSlippiConnectStatus();
+    if (status == SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_CONNECTED)
+      m_state = ProcessState::CONNECTION_SUCCESS;
+    else if (status == SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_FAILED)
+    { SetError("Local loopback peers could not connect"); m_state = ProcessState::ERROR_ENCOUNTERED; }
+  }
 	return m_state;
 }
 
 std::string SlippiMatchmaking::GetErrorMessage()
 {
+	std::lock_guard<std::mutex> lock(m_errorMutex);
 	return m_errorMsg;
 }
 
 bool SlippiMatchmaking::IsSearching()
 {
-	return searchingStates.count(m_state) != 0;
+	return searchingStates.count(m_state.load()) != 0;
 }
 
 std::unique_ptr<SlippiNetplayClient> SlippiMatchmaking::GetNetplayClient()
@@ -97,7 +113,7 @@ void SlippiMatchmaking::MatchmakeThread()
 			break;
 		}
 
-		switch (m_state)
+		switch (m_state.load())
 		{
 		case ProcessState::INITIALIZING:
 			startMatchmaking();
@@ -286,7 +302,7 @@ void SlippiMatchmaking::startMatchmaking()
 			if (retryCount > 10)
 			{
 				m_state = ProcessState::ERROR_ENCOUNTERED;
-				m_errorMsg = "Could not validate ISO";
+				SetError("Could not validate ISO");
 				return;
 			}
 			check = slprs_get_iso_md5_check(slprs_exi_device_ptr);
@@ -295,7 +311,7 @@ void SlippiMatchmaking::startMatchmaking()
 		if (check.result == 2)
 		{
 			m_state = ProcessState::ERROR_ENCOUNTERED;
-			m_errorMsg = "Cannot queue for this mode with a modded ISO known to desync";
+			SetError("Cannot queue for this mode with a modded ISO known to desync");
 			return;
 		}
 	}
@@ -308,13 +324,15 @@ void SlippiMatchmaking::startMatchmaking()
 		// A forced port can still be held by the previous session, which is torn down in the
 		// background and keeps it for about three seconds after a set while it disconnects. Spread
 		// the attempts over that long instead of failing all of them at once.
-		if (customPort && retryCount > 0)
+		if ((customPort || m_forcedLocalPort) && retryCount > 0)
 			Common::SleepCurrentThread(225);
 
 		if (isMmTerminated)
 			return;
 
-		if (customPort)
+		if (m_forcedLocalPort)
+			m_hostPort = m_forcedLocalPort;
+		else if (customPort)
 			m_hostPort = SConfig::GetInstance().m_slippiNetplayPort;
 		else
 			m_hostPort = 41000 + (generator() % 10000);
@@ -328,13 +346,14 @@ void SlippiMatchmaking::startMatchmaking()
 
 		m_client = enet_host_create(&clientAddr, 1, 3, 0, 0);
 		retryCount++;
+    if (m_forcedLocalPort && !m_client) break;
 	}
 
 	if (m_client == nullptr)
 	{
 		// Failed to create client
 		m_state = ProcessState::ERROR_ENCOUNTERED;
-		m_errorMsg = "Failed to create mm client";
+		SetError("Failed to create mm client");
 		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Failed to create client...");
 		return;
 	}
@@ -457,6 +476,7 @@ void SlippiMatchmaking::handleMatchmaking()
 
 		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Received error from server: %s", m_errorMsg.c_str());
 		m_state = ProcessState::ERROR_ENCOUNTERED;
+		SetError(m_errorMsg);
 		return;
 	}
 
@@ -478,7 +498,7 @@ void SlippiMatchmaking::handleMatchmaking()
 	{
 		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Match result was missing");
 		m_state = ProcessState::ERROR_ENCOUNTERED;
-		m_errorMsg = "Invalid response when getting mm status";
+		SetError("Invalid response when getting mm status");
 		return;
 	}
 
@@ -489,7 +509,7 @@ void SlippiMatchmaking::handleMatchmaking()
 	{
 		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Match result could not be parsed");
 		m_state = ProcessState::ERROR_ENCOUNTERED;
-		m_errorMsg = "Invalid response when getting mm status";
+		SetError("Invalid response when getting mm status");
 		return;
 	}
 
@@ -788,7 +808,8 @@ u8 SlippiMatchmaking::RemotePlayerCount()
 
 void SlippiMatchmaking::handleConnecting()
 {
-	auto userInfo = m_user->GetUserInfo();
+  if (isMmTerminated) return;
+	auto userInfo = GetIdentity();
 
 	m_isSwapAttempt = false;
 	m_netplayClient = nullptr;
@@ -819,15 +840,23 @@ void SlippiMatchmaking::handleConnecting()
 
 	while (!m_netplayClient)
 	{
+    if (isMmTerminated)
+    {
+      if (m_forcedLocalPort) client->RequestStop();
+      return;
+    }
 		auto status = client->GetSlippiConnectStatus();
 		if (status == SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_INITIATED)
 		{
 			INFO_LOG(SLIPPI_ONLINE, "[Matchmaking] Connection not yet successful");
-			Common::SleepCurrentThread(500);
+			Common::SleepCurrentThread(m_forcedLocalPort ? 10 : 500);
 
 			// Deal with class shut down
-			if (m_state != ProcessState::OPPONENT_CONNECTING)
-				return;
+      if (m_state != ProcessState::OPPONENT_CONNECTING)
+      {
+        if (m_forcedLocalPort) client->RequestStop();
+        return;
+      }
 
 			continue;
 		}
@@ -838,7 +867,7 @@ void SlippiMatchmaking::handleConnecting()
 			// connecting to.
 			ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Failed to connect to players");
 			m_state = ProcessState::ERROR_ENCOUNTERED;
-			m_errorMsg = "Timed out waiting for other players to connect";
+			SetError("Timed out waiting for other players to connect");
 			auto failedConns = client->GetFailedConnections();
 			if (!failedConns.empty())
 			{
@@ -856,7 +885,7 @@ void SlippiMatchmaking::handleConnecting()
 						err << ", ";
 					}
 				}
-				m_errorMsg = err.str();
+				SetError(err.str());
 			}
 
 			return;
@@ -879,4 +908,42 @@ void SlippiMatchmaking::handleConnecting()
 
 	// Connection success, our work is done
 	m_state = ProcessState::CONNECTION_SUCCESS;
+}
+
+void SlippiMatchmaking::SetError(const std::string& message)
+{
+  std::lock_guard<std::mutex> lock(m_errorMutex);
+  m_errorMsg = message;
+}
+SlippiUser::UserInfo SlippiMatchmaking::GetIdentity()
+{
+  return m_identity ? *m_identity : m_user->GetUserInfo();
+}
+
+void SlippiMatchmaking::SetupLocalTeamsLoopback(u8 slot, u16 basePort)
+{
+  m_localTeamsLoopback = true;
+  m_searchSettings.mode = OnlinePlayMode::TEAMS;
+  m_localPlayerIndex = slot;
+  m_isHost = slot == 0;
+  m_hostPort = basePort + slot;
+  m_mmResult.id = "local-teams-loopback";
+  m_mmResult.items = 0;
+  m_mmResult.stages = {0x1F};
+  m_allowedStages = m_mmResult.stages;
+  std::vector<std::string> addresses;
+  std::vector<u16> ports;
+  for (u8 i = 0; i < 4; ++i)
+  {
+    SlippiUser::UserInfo player;
+    player.uid = "local-test-" + std::to_string(i + 1);
+    player.displayName = "Local " + std::to_string(i + 1);
+    player.connectCode = "LOCAL#" + std::to_string(i + 1);
+    player.port = i + 1;
+    m_playerInfo.push_back(player);
+    if (i != slot) { addresses.push_back("127.0.0.1"); ports.push_back(basePort + i); }
+  }
+  m_mmResult.players = m_playerInfo;
+  m_netplayClient = std::make_unique<SlippiNetplayClient>(addresses, ports, 3, m_hostPort, m_isHost, slot);
+  m_state = ProcessState::OPPONENT_CONNECTING;
 }

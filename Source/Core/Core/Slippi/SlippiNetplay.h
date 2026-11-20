@@ -199,6 +199,7 @@ class SlippiNetplayClient
 	SlippiConnectStatus GetSlippiConnectStatus();
 	std::vector<int> GetFailedConnections();
 	void StartSlippiGame();
+  void RequestStop(); // Prompt teardown for the coordinated local group only.
 	void SendConnectionSelected();
 	void SendSlippiPad(std::unique_ptr<SlippiPad> pad);
 	void SendSlippiPadSuggestion(s32 targetFrame, u32 seq, const u8 *pad);
@@ -215,6 +216,7 @@ class SlippiNetplayClient
 	SlippiDisconnectReason GetDisconnectReason();
 	void FillDroppedPlayerInputs(s32 frame);
 	SlippiMatchInfo *GetMatchInfo();
+  SlippiMatchInfo GetMatchInfoSnapshot();
 	SlippiPlayerSelections GetSlippiRemoteChatMessage(bool isChatEnabled);
 	u8 GetSlippiRemoteSentChatMessage(bool isChatEnabled);
 	s32 CalcTimeOffsetUs();
@@ -246,6 +248,7 @@ class SlippiNetplayClient
 	std::string m_selected_game;
 	Common::Flag m_is_running{false};
 	Common::Flag m_do_loop{true};
+  std::atomic<bool> m_immediateShutdown{false};
 
 	unsigned int m_minimum_buffer_size = 6;
 
@@ -333,6 +336,7 @@ class SlippiNetplayClient
 
 	std::vector<int> failedConnections;
 	SlippiMatchInfo matchInfo;
+  std::mutex selectionMutex;
 
 	bool m_is_recording = false;
 
@@ -361,9 +365,9 @@ class SlippiNetplayClient
 
 	u32 m_timebase_frame = 0;
 };
-extern SlippiNetplayClient *SLIPPI_NETPLAY; // singleton static pointer
+extern std::atomic<unsigned> SLIPPI_NETPLAY_CLIENT_COUNT;
 
 static bool IsOnline()
 {
-	return SLIPPI_NETPLAY != nullptr;
+	return SLIPPI_NETPLAY_CLIENT_COUNT.load() != 0;
 }
