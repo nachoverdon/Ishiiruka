@@ -6,7 +6,6 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include <fstream>
 #include <sstream>
-#include <stdexcept>
 
 LocalTeamsCoordinator::LocalTeamsCoordinator(uintptr_t device_, SlippiUser* user_, std::function<u16()> randomStage_)
     : randomStage(std::move(randomStage_)), device(device_), user(user_)
@@ -216,19 +215,42 @@ void LocalTeamsCoordinator::SetSearchCode(const std::string& shiftJisCode)
   lobbyCode = SHIFTJISToUTF8(shiftJisCode);
 }
 
-SlippiUser::UserInfo LocalTeamsCoordinator::Identity(unsigned index, const SlippiUser::UserInfo& fallback)
+bool LocalTeamsCoordinator::Identity(unsigned index, const SlippiUser::UserInfo& fallback,
+                                     SlippiUser::UserInfo& out, std::string& errorOut)
 {
-  if (identityFiles[index].empty()) return fallback;
+  if (identityFiles[index].empty())
+  {
+    out = fallback;
+    return true;
+  }
   std::ifstream input(identityFiles[index]);
-  if (!input) throw std::runtime_error("Could not open configured identity " + std::to_string(index + 1));
-  json value;
-  input >> value;
+  if (!input)
+  {
+    errorOut = "Could not open configured identity " + std::to_string(index + 1);
+    return false;
+  }
+  json value = json::parse(input, nullptr, false);
+  if (value.is_discarded() || !value.is_object())
+  {
+    errorOut = "Invalid configured identity " + std::to_string(index + 1);
+    return false;
+  }
+  auto readString = [&](const char* key, std::string& dst) {
+    auto it = value.find(key);
+    if (it == value.end() || !it->is_string())
+      return false;
+    dst = it->get<std::string>();
+    return true;
+  };
   auto identity = fallback;
-  identity.uid = value.at("uid").get<std::string>();
-  identity.playKey = value.at("playKey").get<std::string>();
-  identity.displayName = value.at("displayName").get<std::string>();
-  identity.connectCode = value.at("connectCode").get<std::string>();
-  return identity;
+  if (!readString("uid", identity.uid) || !readString("playKey", identity.playKey) ||
+      !readString("displayName", identity.displayName) || !readString("connectCode", identity.connectCode))
+  {
+    errorOut = "Invalid configured identity " + std::to_string(index + 1);
+    return false;
+  }
+  out = std::move(identity);
+  return true;
 }
 
 bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& primary)
@@ -251,15 +273,20 @@ bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& prim
   const auto fallback = user->GetUserInfo();
   // Read every identity before starting any thread. Never log play keys.
   std::array<SlippiUser::UserInfo, 4> identities;
-  try
+  std::string identityError;
+  for (unsigned i = 0; i < state.count; ++i)
   {
-    for (unsigned i = 0; i < state.count; ++i)
+    if (!Identity(i, fallback, identities[i], identityError))
     {
-      identities[i] = Identity(i, fallback);
-      if (identities[i].uid.empty() || identities[i].playKey.empty()) throw std::runtime_error("Log in before searching");
+      Fail(identityError);
+      return false;
+    }
+    if (identities[i].uid.empty() || identities[i].playKey.empty())
+    {
+      Fail("Log in before searching");
+      return false;
     }
   }
-  catch (const std::exception& ex) { Fail(ex.what()); return false; }
   validated = published = false;
   state.phase = LocalTeams::Phase::Searching;
   state.startArmed = false;

@@ -313,3 +313,10 @@ if(UNIX)
 endif(UNIX)
 
 add_dolphin_library(core "${SRCS}" "${LIBS}")
+
+if(NOT MSVC)
+	# LocalTeamsSelfTest (and LocalTeamsAsmSelfTest.h) uses exceptions internally for test
+	# assertions and catches them before returning. Replacing COMPILE_FLAGS after
+	# add_dolphin_library also drops the -fno-exceptions PCH for this file only.
+	set_source_files_properties(Slippi/LocalTeamsSelfTest.cpp PROPERTIES COMPILE_FLAGS "-fexceptions")
+endif()

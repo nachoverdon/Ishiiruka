@@ -55,7 +55,7 @@ private:
   bool nativeCSS = true;
   std::array<std::string, 4> identityFiles;
   std::string lobbyCode, error, lastStatus;
-  SlippiUser::UserInfo Identity(unsigned index, const SlippiUser::UserInfo& fallback);
+  bool Identity(unsigned index, const SlippiUser::UserInfo& fallback, SlippiUser::UserInfo& out, std::string& errorOut);
   SlippiPlayerSelections Selection(unsigned index) const;
   void ShowStatus();
   void Fail(const std::string& message);
