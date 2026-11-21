@@ -2,6 +2,7 @@
 #include "Core/Slippi/LocalTeamsCoordinator.h"
 #include "Common/FileUtil.h"
 #include "Core/Slippi/SlippiMatchmaking.h"
+#include "SlippiRustExtensions.h"
 #include "Core/ConfigManager.h"
 #include "Common/Thread.h"
 #include <chrono>
@@ -25,24 +26,21 @@ void Await(const std::function<bool()>& predicate, const char* message)
   }
 }
 
-// Exercise cancellation while real ENet workers wait on a silent local server.
+// Exercise cancellation while real matchmaking workers wait on a silent local UDP socket.
 // No authentication or production matchmaking request is sent.
 class CancelMatchmakingFixture final : public SlippiMatchmaking
 {
 public:
-  CancelMatchmakingFixture() : SlippiMatchmaking(0,nullptr,49124) {}
+  CancelMatchmakingFixture() : SlippiMatchmaking(0, nullptr, 49124) {}
   std::atomic<bool> waiting{false};
   void WaitOn(const ENetAddress& address)
   {
-    m_client=enet_host_create(nullptr,1,1,0,0);
-    Require(m_client!=nullptr,"cancel fixture could not create an ENet host");
-    m_server=enet_host_connect(m_client,&address,1,0);
-    Require(m_server!=nullptr,"cancel fixture could not create an ENet peer");
-    enet_host_flush(m_client);
-    m_matchmakeThread=std::thread([this]{
-      waiting.store(true,std::memory_order_release);
-      json response;
-      receiveMessage(response,5000);
+    m_client = enet_host_create(nullptr, 1, 1, 0, 0);
+    Require(m_client != nullptr, "cancel fixture could not create an ENet host");
+    m_matchmakeThread = std::thread([this, address] {
+      waiting.store(true, std::memory_order_release);
+      SlippiStunObservation result{};
+      stunBindingRequest(address, result);
     });
   }
 };
