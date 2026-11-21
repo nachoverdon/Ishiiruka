@@ -4,7 +4,7 @@
 	branch = master
 [submodule "Externals/SlippiRustExtensions"]
 	path = Externals/SlippiRustExtensions
-	url = /home/bazoo/Projects/SlippiTeams/slippi-rust-extensions_nachoverdon
+	url = https://github.com/nachoverdon/slippi-rust-extensions.git
 [submodule "Externals/corrosion"]
 	path = Externals/corrosion
 	url = https://github.com/corrosion-rs/corrosion
