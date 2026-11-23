@@ -652,6 +652,24 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
         Require(cleared[16+4*player]==0 && cleared[17+4*player]==0 && cleared[18+4*player]==0 && cleared[19+4*player]==0 && cards.state.selections[player].rng==0,"mode exit retained a remembered character, costume, team or saved pick");
     }
     report << "PASS: leaving Teams clears all four card caches in idle/connected modes; Z cancellation and normal rematches retain selections\n";
+    {
+      const std::string iniPath = File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini";
+      File::Delete(iniPath);
+      const u8 pollButtons[8] = {};
+      LocalTeamsCoordinator defaults(0, nullptr, [] { return u16(0x8); });
+      const auto unranked = defaults.Poll(SlippiMatchmaking::UNRANKED, pollButtons);
+      Require(!defaults.Active() && unranked[0] == 0, "default local teams activated outside Teams");
+      const auto teams = defaults.Poll(u8(SlippiMatchmaking::TEAMS | 0x20), pollButtons, nullptr, 0);
+      Require(defaults.Active() && defaults.NativeCSS() && defaults.state.count == 1 &&
+              teams[0] == 1 && teams[1] == 1 && teams[9] == 1,
+              "local teams did not default to enabled native 1-P CSS when local-teams.ini is missing");
+      File::WriteStringToFile("[LocalTeams]\nEnabled=False\n", iniPath);
+      LocalTeamsCoordinator disabled(0, nullptr, [] { return u16(0x8); });
+      const auto off = disabled.Poll(u8(SlippiMatchmaking::TEAMS | 0x20), pollButtons, nullptr, 0);
+      Require(!disabled.Active() && off[0] == 0, "Enabled=False in local-teams.ini did not disable local teams");
+      File::Delete(iniPath);
+    }
+    report << "PASS: local teams defaults to enabled native 1-P CSS when local-teams.ini is absent and respects Enabled=False\n";
   }
   catch (const std::exception& error) { report << "FAIL: " << error.what() << '\n'; result = 1; }
   enet_deinitialize();

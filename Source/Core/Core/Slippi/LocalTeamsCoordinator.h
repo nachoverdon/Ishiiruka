@@ -47,7 +47,7 @@ private:
   u16 stageId = 0;
   uintptr_t device;
   SlippiUser* user;
-  bool enabled = false, active = false, validated = false, published = false;
+  bool enabled = true, active = false, validated = false, published = false;
   bool lobbyDisconnected = false;
   std::array<unsigned, 4> localSlots{{4, 4, 4, 4}};
   unsigned basePort = 49000;

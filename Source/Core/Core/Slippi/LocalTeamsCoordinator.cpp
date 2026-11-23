@@ -13,7 +13,7 @@ LocalTeamsCoordinator::LocalTeamsCoordinator(uintptr_t device_, SlippiUser* user
   IniFile ini;
   ini.Load(File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini");
   auto section = ini.GetOrCreateSection("LocalTeams");
-  section->Get("Enabled", &enabled, false);
+  section->Get("Enabled", &enabled, true);
   section->Get("Count", &state.count, 1u);
   section->Get("BasePort", &basePort, 49000u);
   section->Get("LoopbackTest", &loopback, false);
