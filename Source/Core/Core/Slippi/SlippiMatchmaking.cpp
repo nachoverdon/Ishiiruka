@@ -431,7 +431,7 @@ void SlippiMatchmaking::startMatchmaking()
 	// Hand the search to the Rust side, which talks to the matchmaking service
 	std::string lan = lanAddr;
 
-	SlippiMatchmakingRequest request;
+	SlippiMatchmakingRequest request = {};
 	request.mode = (u8)m_searchSettings.mode;
 	request.connect_code = (const u8 *)m_searchSettings.connectCode.data();
 	request.connect_code_len = m_searchSettings.connectCode.size();
@@ -439,6 +439,14 @@ void SlippiMatchmaking::startMatchmaking()
 	request.lan_addr = lan.c_str();
 	request.stun[0] = stun[0];
 	request.stun[1] = stun[1];
+	request.allow_concurrent = m_forcedLocalPort != 0;
+	if (m_identity)
+	{
+		request.user_uid = m_identity->uid.c_str();
+		request.user_play_key = m_identity->playKey.c_str();
+		request.user_connect_code = m_identity->connectCode.c_str();
+		request.user_display_name = m_identity->displayName.c_str();
+	}
 
 	// A cancel that arrived during STUN must not start a session nobody will poll. Starting one
 	// would also end a newer search the user may have begun in the meantime.
@@ -457,26 +465,27 @@ void SlippiMatchmaking::handleMatchmaking()
 	if (m_state != ProcessState::MATCHMAKING)
 		return;
 
-	int rustState = slprs_mm_state(slprs_exi_device_ptr);
+	int rustState = slprs_mm_state(slprs_exi_device_ptr, m_sessionId);
 	switch (rustState)
 	{
 	case RUST_MM_CONNECTING:
 	case RUST_MM_QUEUED:
 		if (m_hasStunAddr && Common::Timer::GetTimeMs() - m_lastKeepaliveMs >= STUN_KEEPALIVE_INTERVAL_MS)
 			sendStunKeepalive();
-		Common::SleepCurrentThread(250);
+		Common::SleepCurrentThread(m_forcedLocalPort ? 50 : 250);
 		return;
 
 	case RUST_MM_FAILED:
 	{
-		char *message = slprs_mm_error_message(slprs_exi_device_ptr);
-		m_errorMsg = message ? std::string(message) : "Matchmaking failed";
+		char *message = slprs_mm_error_message(slprs_exi_device_ptr, m_sessionId);
+		std::string errMsg = (message && *message) ? std::string(message) : "Matchmaking failed";
 		slprs_mm_free_string(message);
+		slprs_mm_cancel(slprs_exi_device_ptr, m_sessionId);
 		m_sessionId = 0;
 
-		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Received error from server: %s", m_errorMsg.c_str());
+		ERROR_LOG(SLIPPI_ONLINE, "[Matchmaking] Received error from server: %s", errMsg.c_str());
 		m_state = ProcessState::ERROR_ENCOUNTERED;
-		SetError(m_errorMsg);
+		SetError(errMsg);
 		return;
 	}
 
@@ -486,13 +495,15 @@ void SlippiMatchmaking::handleMatchmaking()
 	default:
 		// The session ended without a result, which only happens if it was cancelled out from
 		// under us
+		slprs_mm_cancel(slprs_exi_device_ptr, m_sessionId);
 		m_sessionId = 0;
 		m_state = ProcessState::ERROR_ENCOUNTERED;
-		m_errorMsg = "Matchmaking was cancelled";
+		SetError("Matchmaking was cancelled");
 		return;
 	}
 
-	char *resultJson = slprs_mm_take_result_json(slprs_exi_device_ptr);
+	char *resultJson = slprs_mm_take_result_json(slprs_exi_device_ptr, m_sessionId);
+	slprs_mm_cancel(slprs_exi_device_ptr, m_sessionId);
 	m_sessionId = 0;
 	if (!resultJson)
 	{

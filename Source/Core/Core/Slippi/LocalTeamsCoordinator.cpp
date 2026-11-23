@@ -256,6 +256,13 @@ bool LocalTeamsCoordinator::Identity(unsigned index, const SlippiUser::UserInfo&
 bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& primary)
 {
   if (!Active() || !state.AllConfirmed()) return false;
+  RequestStop();
+  for (auto& guest : guests)
+  {
+    guest.matchmaking.reset();
+    guest.netplay.reset();
+    guest.previous.fill(0);
+  }
   if (loopback)
   {
     validated = published = false;
