@@ -520,6 +520,7 @@ void Run(const std::string& directory, std::ofstream& report)
       Require(Memory::Read_U8(raw+34)==0xFF && Memory::Read_U8(raw+46)==0xFF, "native CSS enabled unused physical controllers");
       Require(pads.packets.size()==1 && pads.packets[0].size()==LocalTeams::PollPayloadSize+1 && pads.packets[0][6]==0x10 && pads.packets[0][7]==0x10,
               "native CSS lost raw Start before coordinator polling");
+      Require(pads.allocations == 0, "native CSS allocated on IRQ stack");
     }
     for (unsigned phase : {0u,1u,2u,5u})
     {
@@ -540,6 +541,7 @@ void Run(const std::string& directory, std::ofstream& report)
               "ready/searching/waiting native CSS froze a cursor's movement");
       Require(Memory::Read_U16(raw)==0 && Memory::Read_U16(raw+12)==(phase==0?0x110:0x10),
               "locked character controls leaked or unready player's controls were blocked");
+      Require(moving.allocations == 0, "CSS input polling allocated on IRQ stack");
     }
     report << "PASS: both cursors retain stick movement after ready, code entry, searching and connecting\n";
     for(unsigned primary=0;primary<4;++primary)
@@ -560,6 +562,23 @@ void Run(const std::string& directory, std::ofstream& report)
       Memory::CopyToEmu(raw,values,sizeof(values)); PowerPC::ppcState.spr[SPR_LR]=Runner::Return;
       blocked.Run(Elf::Base,{Elf::Base+u32(input.text.size())});
       Require(Memory::Read_U16(raw+12)==0 && Memory::Read_U8(raw+14)==10+(primary+1)%4 && Memory::Read_U8(raw+22)==0,"joining buttons leaked or held stick movement did not immediately reach the claimed cursor");
+      Require(blocked.allocations == 0, "CSS join input polling allocated on IRQ stack");
+    }
+    for (unsigned gate = 0; gate < 4; ++gate)
+    {
+      Runner gated(input); gated.Status(2, 0);
+      const auto raw = Runner::Stack + input.Symbol("P1_PAD_OFFSET");
+      Memory::Write_U16(0x0100, raw);
+      Memory::Write_U8(12, raw + 2);
+      if (gate == 0) Memory::Write_U8(1, Runner::Css + input.Symbol("CSSDT_LOADING"));
+      else if (gate == 1) Memory::Write_U32(0, input.Symbol("CSSDT_BUF_ADDR"));
+      else if (gate == 2) Memory::Write_U8(1, Runner::R13 + input.Symbol("OFST_R13_ONLINE_MODE"));
+      else Memory::Write_U8(0, Runner::Css + input.Symbol("CSSDT_LOCAL_TEAMS_STATUS"));
+      gated.Run(Elf::Base, {Elf::Base + u32(input.text.size())});
+      Require(gated.allocations == 0 && gated.packets.empty(),
+              "CSS IRQ polling ran while loading, uninitialized, inactive, or outside Teams");
+      Require(Memory::Read_U16(raw) == 0x0100 && Memory::Read_U8(raw + 2) == 12,
+              "gated CSS IRQ polling modified controller inputs");
     }
     report << "PASS: every primary adapter port owns card one; unclaimed controls stay masked, claimed movement works immediately while joining buttons remain consumed\n";
     Elf menuEnter(directory+"menu-enter.elf"), gameInit(directory+"game-init.elf"), cursorPort(directory+"cursor-port.elf"), tokenPort(directory+"token-port.elf");
@@ -665,12 +684,22 @@ void Run(const std::string& directory, std::ofstream& report)
         auto& cpu=PowerPC::ppcState;
         Memory::Write_U32((cpu.gpr[3]==0x81208000?0x81210000:0x81100000)+cpu.gpr[5]*0x100,cpu.gpr[4]);
       };
+      Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOADING"));
       init.services[nativeInit.Symbol("JObj_SetFlagsAll")]=[] {
         auto& cpu=PowerPC::ppcState; Memory::Write_U32(cpu.gpr[4],cpu.gpr[3]+0x14);
       };
       init.Run(Elf::Base,{Elf::Base+u32(nativeInit.text.size())});
       Require(Memory::Read_U8(Runner::Css+nativeInit.Symbol("CSSDT_NATIVE_VISIBLE_COUNT"))==count,
               "new CSS did not commit its matching visible player count");
+      Require(!Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")),
+              "native CSS init did not clear CSSDT_LOADING");
+      {
+        Runner nonNative(nativeInit); nonNative.Status(2, 0);
+        Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOADING"));
+        nonNative.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+        Require(!Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")),
+                "non-native CSS init did not clear CSSDT_LOADING");
+      }
       for(unsigned player=0;player<4;++player)
         Require((Memory::Read_U32(0x81200080+player*0x100+0x14)==0x10)==(player>=count || (waiting && player>0)),
                 "native CSS cursor visibility did not match claimed cards");
@@ -947,6 +976,8 @@ void Run(const std::string& directory, std::ofstream& report)
         reload.Run(Elf::Base,{Elf::Base+u32(loadCss.text.size())});
         Require(Memory::Read_U8(Runner::Css+loadCss.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+1)==requested,
                 "new CSS reverted the clicked player count");
+        Require(Memory::Read_U8(Runner::Css+loadCss.Symbol("CSSDT_LOADING"))==1,
+                "CSS load did not set CSSDT_LOADING before init completes");
         for(unsigned player=0;player<4;++player)
           Require(Memory::Read_U8(Runner::SceneData+0x71+36*player)==(player<requested?0:3) &&
                   Memory::Read_U8(Runner::SceneData+0x70+36*player)==26,

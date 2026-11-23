@@ -328,6 +328,8 @@ class CEXISlippi : public IEXIDevice
 	u32 stallFrameCounts[SLIPPI_REMOTE_PLAYER_MAX] = {};
 
 	std::vector<u8> m_read_queue;
+	std::vector<u8> m_saved_read_queue;
+	bool m_poll_read_pending = false;
 	std::unique_ptr<Slippi::SlippiGame> m_current_game = nullptr;
 	SlippiSpectateServer *m_slippiserver = nullptr;
 	SlippiMatchmaking::MatchSearchSettings lastSearch;

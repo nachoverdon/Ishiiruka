@@ -3555,8 +3555,15 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
     {
       ERROR_LOG(SLIPPI, "Truncated local teams command: 0x%X", byte);
       m_read_queue.clear();
+      m_saved_read_queue.clear();
+      m_poll_read_pending = false;
       return;
     }
+		if (byte != CMD_LOCAL_TEAMS_POLL && m_poll_read_pending)
+		{
+			m_saved_read_queue.clear();
+			m_poll_read_pending = false;
+		}
 		switch (byte)
 		{
 		case CMD_RECEIVE_GAME_END:
@@ -3745,6 +3752,15 @@ void CEXISlippi::DMARead(u32 addr, u32 size)
 
 	// Copy buffer data to memory
 	Memory::CopyToEmu(addr, queueAddr, size);
+
+	// Restore any main-thread EXI response that was interrupted by a VI-retrace
+	// local-teams poll before its paired DMARead could execute.
+	if (m_poll_read_pending)
+	{
+		m_read_queue = std::move(m_saved_read_queue);
+		m_saved_read_queue.clear();
+		m_poll_read_pending = false;
+	}
 }
 
 // Configures (or reconfigures) the Jukebox by calling over the C FFI boundary.
@@ -3796,6 +3812,11 @@ void CEXISlippi::pollLocalTeams(u8* payload)
   const auto status = localTeams->Poll(payload[0], payload + 1, payload + 10, payload[9], Common::swap32(payload + 58));
   if (localTeams->Active() && localTeams->state.phase == LocalTeams::Phase::Selecting)
     localTeamsGameInitialized = false;
+  if (!m_poll_read_pending)
+  {
+    m_saved_read_queue = std::move(m_read_queue);
+    m_poll_read_pending = true;
+  }
   m_read_queue.assign(status.begin(), status.end());
 }
 void CEXISlippi::confirmLocalTeams(u8* payload)
