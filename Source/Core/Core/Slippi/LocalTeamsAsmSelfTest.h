@@ -297,12 +297,15 @@ void Run(const std::string& directory, std::ofstream& report)
       PowerPC::ppcState.gpr[3]=Runner::Minor;
       Memory::Write_U8(1,Runner::Css+scene.Symbol("CSSDT_NATIVE_RELOAD"));
       Memory::Write_U8(5,0x80479D35);
+      const auto savedMask=scene.Symbol("CSS_SAVED_CURSORS_ADDR")+scene.Symbol("SAVED_CURSORS_MASK");
+      Memory::Write_U32(0x05,savedMask);
       bool stockDecide=false;
       reload.services[0x801BAAD0]=[&]{ stockDecide=true; };
       Require(reload.Run(scene.Symbol("CSSSceneDecide"),{scene.Symbol("SplashSceneInit"),Runner::Return})==Runner::Return &&
               Memory::Read_U8(0x80479D35)==1 && !stockDecide &&
-              !Memory::Read_U8(Runner::Css+scene.Symbol("CSSDT_NATIVE_RELOAD")),
-              "count change launched a match or skipped rebuilding CSS");
+              !Memory::Read_U8(Runner::Css+scene.Symbol("CSSDT_NATIVE_RELOAD")) &&
+              Memory::Read_U32(savedMask)==0x05,
+              "count change launched a match, skipped rebuilding CSS or cleared saved cursor positions");
       // Retail routing interprets zero as automatic advance, and positive
       // requests as minor+1. Continue into those actual instructions.
       const u32 routing[]={0x881F0003,0x981F0004,0x887F0005,0x28030000,0x41820018,
@@ -321,6 +324,8 @@ void Run(const std::string& directory, std::ofstream& report)
       {
         Runner back(scene); back.Status(count,0);
         PowerPC::ppcState.gpr[1] += stackOffset;
+        const auto savedMask=scene.Symbol("CSS_SAVED_CURSORS_ADDR")+scene.Symbol("SAVED_CURSORS_MASK");
+        Memory::Write_U32(0x05,savedMask);
         Memory::Write_U8(1,Runner::Css+scene.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+9);
         Memory::Write_U8(2,requestInScene?Runner::SceneData+3:Runner::R13-0x49AA);
         Memory::Write_U8(u8((1u<<selected)-1),Runner::Css+scene.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+4);
@@ -342,8 +347,9 @@ void Run(const std::string& directory, std::ofstream& report)
                 Memory::Read_U8(0x80479D31)==1 && Memory::Read_U8(0x80479D3C)==1 &&
                 back.packets.size()==2 && back.packets[0].size()==LocalTeams::PollPayloadSize+1 &&
                 back.packets[0][0]==0xc5 && back.packets[0][1]==0x23 && back.packets[0][10]==4 &&
-                back.packets[1]==std::vector<u8>{u8(scene.Symbol("CONST_SlippiCmdCleanupConnections"))},
-                "native Back advanced to stage select or failed to return to menu/close local clients");
+                back.packets[1]==std::vector<u8>{u8(scene.Symbol("CONST_SlippiCmdCleanupConnections"))} &&
+                Memory::Read_U32(savedMask)==0,
+                "native Back advanced to stage select, retained saved cursors or failed to return to menu/close local clients");
         for(unsigned player=0;player<4;++player)
         {
           const u32 door=0x803F0DFC+36*player;
@@ -357,14 +363,26 @@ void Run(const std::string& directory, std::ofstream& report)
     for(unsigned localReady : {0u,1u}) for(unsigned remoteReady : {0u,1u})
     {
       Runner guard(scene); guard.Status(2,0);
+      const auto savedMask=scene.Symbol("CSS_SAVED_CURSORS_ADDR")+scene.Symbol("SAVED_CURSORS_MASK");
+      Memory::Write_U32(0x05,savedMask);
       Memory::Write_U8(1,Runner::Css+scene.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+9);
       Memory::Write_U8(u8(localReady),Runner::Msrb+1); Memory::Write_U8(u8(remoteReady),Runner::Msrb+2);
       Memory::Write_U8(0xFF,Runner::R13+scene.Symbol("OFST_R13_ISWINNER"));
       guard.services[0x801BAAD0]=[]{ Require(PowerPC::ppcState.gpr[3]==Runner::Minor,"scene argument was overwritten"); };
       PowerPC::ppcState.gpr[3]=Runner::Minor;
       Require(guard.Run(scene.Symbol("CSSSceneDecide"),{scene.Symbol("SplashSceneInit"),Runner::Return})==
-              (localReady&&remoteReady?scene.Symbol("SplashSceneInit"):Runner::Return),"unready CSS exit entered an uninitialized match");
+              (localReady&&remoteReady?scene.Symbol("SplashSceneInit"):Runner::Return) &&
+              Memory::Read_U32(savedMask)==0,"unready CSS exit entered an uninitialized match or kept saved cursors");
       if(!(localReady&&remoteReady)) Require(Memory::Read_U8(0x80479D35)==1,"unready exit did not repeat CSS");
+    }
+    {
+      Runner unload(scene);
+      const auto savedMask=scene.Symbol("CSS_SAVED_CURSORS_ADDR")+scene.Symbol("SAVED_CURSORS_MASK");
+      Memory::Write_U32(0x0F,savedMask);
+      PowerPC::ppcState.spr[SPR_LR]=Runner::Return;
+      unload.Run(scene.Symbol("MajorSceneUnload")+4,{Runner::Return});
+      Require(Memory::Read_U32(scene.Symbol("CSSDT_BUF_ADDR"))==0 && Memory::Read_U32(savedMask)==0,
+              "MajorSceneUnload left stale CSSDT pointer or saved cursor mask");
     }
     report << "PASS: native Back at every local count/selection returns to menu using retail major routing; unready exits cannot advance; event callback receives correct scene argument\n";
     for(unsigned count : {1u,2u,3u,4u}) for(unsigned holder=0;holder<count;++holder)
@@ -397,7 +415,8 @@ void Run(const std::string& directory, std::ofstream& report)
     {
       Runner game(input);
       auto& cpu = PowerPC::ppcState;
-      cpu.gpr[1] = Runner::Stack - 0xE0;
+      const u32 frameSize = 8 + input.Symbol("BKP_DEFAULT_FREE_SPACE_SIZE") + 4 * input.Symbol("BKP_MAX_REG");
+      cpu.gpr[1] = Runner::Stack - frameSize;
       Memory::Write_U32(Runner::Stack, cpu.gpr[1]);
       Memory::Write_U32(Runner::Return, Runner::Stack + 4);
       cpu.gpr[26] = 123; cpu.gpr[27] = Runner::Css;
@@ -520,7 +539,38 @@ void Run(const std::string& directory, std::ofstream& report)
       Require(Memory::Read_U8(raw+34)==0xFF && Memory::Read_U8(raw+46)==0xFF, "native CSS enabled unused physical controllers");
       Require(pads.packets.size()==1 && pads.packets[0].size()==LocalTeams::PollPayloadSize+1 && pads.packets[0][6]==0x10 && pads.packets[0][7]==0x10,
               "native CSS lost raw Start before coordinator polling");
+      Require(input.Symbol("CSSDT_CONNECTED_PADS")==0xB1 && input.Symbol("CSSDT_LOCAL_TEAMS_EXI_BUF")==0xC0 &&
+              input.Symbol("CSSDT_SIZE")==0x140 && input.Symbol("CSS_SAVED_CURSORS_ADDR")==0x80005620,
+              "CSSDT layout or static saved-cursor address shifted unexpectedly");
+      Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x0F,
+              "TriggerSendInput did not record all four connected pads before remapping");
       Require(pads.allocations == 0, "native CSS allocated on IRQ stack");
+    }
+    {
+      Runner partial(input); partial.Status(2, 0);
+      partial.pollResponse.assign(LocalTeams::StatusSize, 0);
+      partial.pollResponse[0]=1; partial.pollResponse[1]=2; partial.pollResponse[9]=1;
+      partial.pollResponse[12]=0; partial.pollResponse[13]=2; partial.pollResponse[32]=3;
+      const auto raw = Runner::Stack + input.Symbol("P1_PAD_OFFSET");
+      u8 values[48] = {};
+      values[10]=0; values[22]=0xFF; values[34]=0; values[46]=0xFF;
+      Memory::CopyToEmu(raw, values, sizeof(values));
+      partial.Run(Elf::Base, {Elf::Base + u32(input.text.size())});
+      Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x05,
+              "CSSDT_CONNECTED_PADS did not record raw connected ports (0,2)");
+      values[22]=0;
+      Memory::CopyToEmu(raw, values, sizeof(values));
+      PowerPC::ppcState.spr[SPR_LR] = Runner::Return;
+      partial.Run(Elf::Base, {Elf::Base + u32(input.text.size())});
+      Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x07,
+              "CSSDT_CONNECTED_PADS did not update when another pad connected");
+      values[24]=0x1F; values[26]=42; values[34]=0xFF; // claimed slot 1 (port 2) now disconnected
+      Memory::CopyToEmu(raw, values, sizeof(values));
+      PowerPC::ppcState.spr[SPR_LR] = Runner::Return;
+      partial.Run(Elf::Base, {Elf::Base + u32(input.text.size())});
+      Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x03 &&
+              Memory::Read_U16(raw + 12) == 0 && Memory::Read_U8(raw + 14) == 0 && Memory::Read_U8(raw + 22) == 0,
+              "disconnected claimed pad leaked non-zero error or garbage input into native CSS slot");
     }
     for (unsigned phase : {0u,1u,2u,5u})
     {
@@ -685,21 +735,37 @@ void Run(const std::string& directory, std::ofstream& report)
         Memory::Write_U32((cpu.gpr[3]==0x81208000?0x81210000:0x81100000)+cpu.gpr[5]*0x100,cpu.gpr[4]);
       };
       Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOADING"));
+      for (unsigned i = 0; i < 4; ++i)
+      {
+        Memory::Write_U32(0x1F7F0000, 0x804C1FAC + 0x44 * i);
+        Memory::Write_U8(0xFF, 0x804C1FAC + 0x44 * i + 0x41);
+        Memory::Write_U32(0x1F7F0000, 0x804C20BC + 0x44 * i);
+        Memory::Write_U8(0xFF, 0x804C20BC + 0x44 * i + 0x41);
+      }
+      unsigned padFlushCalls = 0;
+      init.services[nativeInit.Symbol("HSD_PadFlushQueue")] = [&] {
+        Require(PowerPC::ppcState.gpr[3] == 1 && !Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")),
+                "native CSS init did not clear CSSDT_LOADING before flushing raw pad queue");
+        ++padFlushCalls;
+      };
       init.services[nativeInit.Symbol("JObj_SetFlagsAll")]=[] {
         auto& cpu=PowerPC::ppcState; Memory::Write_U32(cpu.gpr[4],cpu.gpr[3]+0x14);
       };
       init.Run(Elf::Base,{Elf::Base+u32(nativeInit.text.size())});
+      Require(padFlushCalls == 1, "native CSS init did not flush stale unremapped pad queue once");
+      for (unsigned slot = 0; slot < 4; ++slot)
+      {
+        const u8 expectedErr = slot < count ? 0 : 0xFF;
+        Require(Memory::Read_U32(0x804C1FAC + 0x44 * slot) == 0 &&
+                Memory::Read_U8(0x804C1FAC + 0x44 * slot + 0x41) == expectedErr &&
+                Memory::Read_U32(0x804C20BC + 0x44 * slot) == 0 &&
+                Memory::Read_U8(0x804C20BC + 0x44 * slot + 0x41) == expectedErr,
+                "native CSS init left stale pad error/buttons that convert skipped-port players to CPU");
+      }
       Require(Memory::Read_U8(Runner::Css+nativeInit.Symbol("CSSDT_NATIVE_VISIBLE_COUNT"))==count,
               "new CSS did not commit its matching visible player count");
       Require(!Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")),
               "native CSS init did not clear CSSDT_LOADING");
-      {
-        Runner nonNative(nativeInit); nonNative.Status(2, 0);
-        Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOADING"));
-        nonNative.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
-        Require(!Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")),
-                "non-native CSS init did not clear CSSDT_LOADING");
-      }
       for(unsigned player=0;player<4;++player)
         Require((Memory::Read_U32(0x81200080+player*0x100+0x14)==0x10)==(player>=count || (waiting && player>0)),
                 "native CSS cursor visibility did not match claimed cards");
@@ -728,6 +794,15 @@ void Run(const std::string& directory, std::ofstream& report)
                 std::abs(readFloat(0x81200000+player*0x100+0x10)+3.4f)<0.001f,
                 "a local hand did not spawn on its own shifted team marker");
       }
+    }
+    {
+      Runner nonNative(nativeInit); nonNative.Status(2, 0);
+      Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOADING"));
+      Memory::Write_U32(0x03, nativeInit.Symbol("CSS_SAVED_CURSORS_ADDR") + nativeInit.Symbol("SAVED_CURSORS_MASK"));
+      nonNative.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+      Require(!Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_LOADING")) &&
+              !Memory::Read_U32(nativeInit.Symbol("CSS_SAVED_CURSORS_ADDR") + nativeInit.Symbol("SAVED_CURSORS_MASK")),
+              "non-native CSS init did not clear CSSDT_LOADING or saved cursor mask");
     }
     for(unsigned count : {1u,2u,3u,4u})
     {
@@ -913,6 +988,131 @@ void Run(const std::string& directory, std::ofstream& report)
       Require(Memory::Read_U8(Runner::Css+css.Symbol("CSSDT_NATIVE_RELOAD"))==unsigned(accepted&&requested) && Memory::Read_U8(Runner::R13-0x49aa)==unsigned(accepted?2:0),"automatic roster action exited on rejection or reloaded instead of returning to menu");
     }
     report << "PASS: per-player B route preserves the main controller's menu exit; automatic add/remove snapshots current picks and reloads only after acceptance\n";
+    {
+      auto runPreservedInit = [&](const std::array<u8, 36>& savedBlock, unsigned newCount, u8 newJoined,
+                                  const std::array<u8, 4>& newPorts) {
+        Runner init(nativeInit); init.Status(newCount, 0);
+        const auto status = Runner::Css + nativeInit.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+        Memory::Write_U8(1, status + 9);
+        Memory::Write_U8(newJoined, status + 32);
+        for (unsigned i = 0; i < 4; ++i) Memory::Write_U8(newPorts[i], status + 12 + i);
+        Memory::CopyToEmu(nativeInit.Symbol("CSS_SAVED_CURSORS_ADDR"), savedBlock.data(), savedBlock.size());
+        Memory::Write_U32(Runner::Buffer, Runner::R13 - 0x49C8);
+        Memory::Write_U32(0x81207000, Runner::Buffer + 0x60);
+        init.services[0x80370E44] = [] { PowerPC::ppcState.gpr[3] = 0x81208000; };
+        for (unsigned joint : {1u, 36u})
+        {
+          Memory::Write_U32(0x81300000 + joint * 0x100, 0x81100000 + joint * 0x100 + 0x18);
+          Memory::Write_U32(0x81400000 + joint * 0x100, 0x81210000 + joint * 0x100 + 0x18);
+        }
+        Memory::Write_U32(0x81410000, 0x81400100 + 8);
+        Memory::Write_U32(0x81411000, 0x81410000 + 8);
+        Memory::Write_U32(0x81412000, 0x81411000 + 0x58);
+        Memory::Write_U32(0x81413000, 0x81412000);
+        Memory::Write_U32(0x00680048, 0x81412000 + 4);
+        init.services[0x8035E24C] = [] {};
+        init.services[0x80371590] = [] {};
+        for (unsigned i = 0; i < 4; ++i)
+        {
+          const u32 cursor = 0x81200000 + i * 0x100, token = 0x81203000 + i * 0x100;
+          Memory::Write_U32(cursor, 0x804A0BC0 + 4 * i); Memory::Write_U32(token, 0x804A0BD0 + 4 * i);
+          Memory::Write_U32(cursor + 0x40, cursor); Memory::Write_U32(token + 0x40, token);
+          Memory::Write_U32(cursor + 0x80, cursor + 0x40 + 0x28); Memory::Write_U32(token + 0x80, token + 0x40 + 0x28);
+        }
+        init.services[nativeInit.Symbol("JObj_GetJObjChild")] = [] {
+          auto& cpu = PowerPC::ppcState;
+          Memory::Write_U32((cpu.gpr[3] == 0x81208000 ? 0x81210000 : 0x81100000) + cpu.gpr[5] * 0x100, cpu.gpr[4]);
+        };
+        init.services[nativeInit.Symbol("HSD_PadFlushQueue")] = [] {};
+        init.services[nativeInit.Symbol("JObj_SetFlagsAll")] = [] {
+          auto& cpu = PowerPC::ppcState; Memory::Write_U32(cpu.gpr[4], cpu.gpr[3] + 0x14);
+        };
+        init.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+        Require(Memory::Read_U32(nativeInit.Symbol("CSS_SAVED_CURSORS_ADDR") + nativeInit.Symbol("SAVED_CURSORS_MASK")) == 0,
+                "InitNativeLocalTeams did not consume/clear SAVED_CURSORS_MASK");
+      };
+      // 1) Count click 2 -> 3 with non-sequential physical ports [2, 0] preserves existing cursors
+      {
+        Runner click(countClick); click.Status(2, 0);
+        const auto status = Runner::Css + countClick.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+        Memory::Write_U8(1, status + 9);
+        Memory::Write_U8(3, status + 32);
+        Memory::Write_U8(2, status + 12); Memory::Write_U8(0, status + 13);
+        auto& cpu = PowerPC::ppcState;
+        cpu.gpr[31] = Runner::Buffer + 0x500; cpu.gpr[28] = 0x100;
+        writeFloat(-24.5f, cpu.gpr[31] + 0x0C); writeFloat(22.0f, cpu.gpr[31] + 0x10);
+        Memory::Write_U32(Runner::Buffer + 0x700, 0x804A0BC0);
+        writeFloat(-24.5f, Runner::Buffer + 0x70C); writeFloat(22.0f, Runner::Buffer + 0x710);
+        Memory::Write_U32(Runner::Buffer + 0x740, 0x804A0BC4);
+        writeFloat(11.25f, Runner::Buffer + 0x74C); writeFloat(-9.5f, Runner::Buffer + 0x750);
+        click.pollResponse.assign(LocalTeams::StatusSize, 0);
+        click.pollResponse[0] = 1; click.pollResponse[1] = 3; click.pollResponse[9] = 1;
+        click.Run(Elf::Base, {0x802622A8});
+        std::array<u8, 36> savedBlock{};
+        Memory::CopyFromEmu(savedBlock.data(), countClick.Symbol("CSS_SAVED_CURSORS_ADDR"), savedBlock.size());
+        Require(Memory::Read_U32(countClick.Symbol("CSS_SAVED_CURSORS_ADDR")) == ((1u << 2) | (1u << 0)),
+                "count click did not save claimed cursor mask by physical port");
+        runPreservedInit(savedBlock, 3, 7, {{2, 0, 1, 4}});
+        Require(std::abs(readFloat(0x81200000 + 0x0C) - (-24.5f)) < 0.001f &&
+                std::abs(readFloat(0x81200000 + 0x10) - 22.0f) < 0.001f &&
+                std::abs(readFloat(0x81200100 + 0x0C) - 11.25f) < 0.001f &&
+                std::abs(readFloat(0x81200100 + 0x10) - (-9.5f)) < 0.001f,
+                "reloaded CSS repositioned existing cursors instead of keeping their coordinates");
+        const float left2 = readFloat(0x803F0DFC + 36 * 2 + 0x1C), right2 = readFloat(0x803F0DFC + 36 * 2 + 0x20);
+        Require(std::abs(readFloat(0x81200200 + 0x0C) - (left2 + right2) * 0.5f) < 0.001f &&
+                std::abs(readFloat(0x81200200 + 0x10) + 3.4f) < 0.001f,
+                "newly added slot 2 did not spawn on its own team marker");
+      }
+      // 2) Start-hold roster add (FN_NATIVE_ROSTER_REQUEST) preserves cursors, exit (r26=0) & rejection do not
+      {
+        Runner roster(css); roster.Status(2, 0);
+        const auto status = Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+        Memory::Write_U8(1, status + 9); Memory::Write_U8(3, status + 34);
+        Memory::Write_U8(3, status + 32);
+        Memory::Write_U8(1, status + 12); Memory::Write_U8(3, status + 13);
+        Memory::Write_U32(Runner::Buffer + 0x700, 0x804A0BC0);
+        writeFloat(3.5f, Runner::Buffer + 0x70C); writeFloat(-12.0f, Runner::Buffer + 0x710);
+        Memory::Write_U32(Runner::Buffer + 0x740, 0x804A0BC4);
+        writeFloat(-19.25f, Runner::Buffer + 0x74C); writeFloat(18.5f, Runner::Buffer + 0x750);
+        roster.pollResponse.assign(LocalTeams::StatusSize, 0);
+        roster.pollResponse[0] = 1; roster.pollResponse[1] = 3; roster.pollResponse[9] = 1;
+        roster.Run(css.Symbol("FN_NATIVE_ROSTER_REQUEST"), {Runner::Return});
+        std::array<u8, 36> savedBlock{};
+        Memory::CopyFromEmu(savedBlock.data(), css.Symbol("CSS_SAVED_CURSORS_ADDR"), savedBlock.size());
+        Require(Memory::Read_U32(css.Symbol("CSS_SAVED_CURSORS_ADDR")) == ((1u << 1) | (1u << 3)),
+                "Start-hold add did not save claimed cursors by physical port");
+        runPreservedInit(savedBlock, 3, 7, {{1, 3, 2, 4}});
+        Require(std::abs(readFloat(0x81200000 + 0x0C) - 3.5f) < 0.001f &&
+                std::abs(readFloat(0x81200000 + 0x10) - (-12.0f)) < 0.001f &&
+                std::abs(readFloat(0x81200100 + 0x0C) - (-19.25f)) < 0.001f &&
+                std::abs(readFloat(0x81200100 + 0x10) - 18.5f) < 0.001f,
+                "Start-hold CSS reload moved existing players' hands");
+        const float left2 = readFloat(0x803F0DFC + 36 * 2 + 0x1C), right2 = readFloat(0x803F0DFC + 36 * 2 + 0x20);
+        Require(std::abs(readFloat(0x81200200 + 0x0C) - (left2 + right2) * 0.5f) < 0.001f &&
+                std::abs(readFloat(0x81200200 + 0x10) + 3.4f) < 0.001f,
+                "Start-hold added player did not spawn on its team marker");
+
+        Runner reject(css); reject.Status(2, 0);
+        Memory::Write_U8(1, Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+        Memory::Write_U8(3, Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 34);
+        Memory::Write_U32(Runner::Buffer + 0x700, 0x804A0BC0);
+        reject.pollResponse.assign(LocalTeams::StatusSize, 0);
+        reject.Run(css.Symbol("FN_NATIVE_ROSTER_REQUEST"), {Runner::Return});
+        Require(Memory::Read_U32(css.Symbol("CSS_SAVED_CURSORS_ADDR")) == 0,
+                "rejected roster request saved cursor mask");
+
+        Runner exitMenu(css); exitMenu.Status(2, 0);
+        Memory::Write_U8(1, Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+        Memory::Write_U8(0, Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 34);
+        Memory::Write_U32(Runner::Buffer + 0x700, 0x804A0BC0);
+        exitMenu.pollResponse.assign(LocalTeams::StatusSize, 0);
+        exitMenu.pollResponse[0] = 1; exitMenu.pollResponse[1] = 1; exitMenu.pollResponse[9] = 1;
+        exitMenu.Run(css.Symbol("FN_NATIVE_ROSTER_REQUEST"), {Runner::Return});
+        Require(Memory::Read_U32(css.Symbol("CSS_SAVED_CURSORS_ADDR")) == 0,
+                "menu exit roster request kept saved cursor mask");
+      }
+    }
+    report << "PASS: adding players via count selector or Start-hold preserves existing cursor coordinates while spawning newly added cursors on team markers\n";
     {
       Elf loadCss(directory+"load-css.elf");
       File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=1\nBasePort=49120\n",
@@ -1119,9 +1319,42 @@ void Run(const std::string& directory, std::ofstream& report)
           Require(lines[5]==std::string(connection==text.Symbol("MM_STATE_MATCHMAKING")?"Searching for %s|":"Connecting to %s|")+std::string(reinterpret_cast<const char*>(room),sizeof(room)),
                   "same-team native CSS did not show the entered room's searching/connecting status");
         }
+        auto checkPressZ = [&](u8 isNative, u8 phase, u8 count, u8 joined, std::array<u8, 4> ports,
+                               u8 connectedPads, u8 connState, const std::string& expected, const char* msg) {
+          lines.clear();
+          Memory::Write_U8(isNative, status + 9);
+          Memory::Write_U8(phase, status + 5);
+          Memory::Write_U8(count, status + 1);
+          Memory::Write_U8(joined, status + 32);
+          for (unsigned p = 0; p < 4; ++p) Memory::Write_U8(ports[p], status + 12 + p);
+          Memory::Write_U8(connectedPads, Runner::Css + text.Symbol("CSSDT_CONNECTED_PADS"));
+          Memory::Write_U8(connState, Runner::Msrb);
+          cpu.gpr[3] = Runner::Buffer + 0x800; cpu.spr[SPR_LR] = Runner::Return;
+          ui.Run(text.Symbol("CSS_ONLINE_TEXT_THINK") + 4, {Runner::Return});
+          Require(lines[7] == expected, msg);
+        };
+        const u8 idle = u8(text.Symbol("MM_STATE_IDLE"));
+        checkPressZ(1, 0, 2, 3, {{0, 2, 4, 4}}, 0x05, idle, "",
+                    "Hold START to join appeared when all connected pads were already added");
+        checkPressZ(1, 0, 2, 3, {{0, 2, 4, 4}}, 0x07, idle, "Hold START to join",
+                    "Hold START to join did not appear when an unadded controller was connected");
+        checkPressZ(1, 0, 2, 1, {{0, 4, 4, 4}}, 0x07, idle, "",
+                    "Hold START to join appeared while a card was still waiting for input");
+        checkPressZ(1, 0, 4, 15, {{0, 1, 2, 3}}, 0x0F, idle, "",
+                    "Hold START to join appeared when all 4 slots were filled");
+        checkPressZ(1, 5, 2, 3, {{0, 2, 4, 4}}, 0x0F, idle, "",
+                    "Hold START to join appeared outside Selecting phase");
+        checkPressZ(1, 0, 2, 3, {{0, 2, 4, 4}}, 0x0F, u8(text.Symbol("MM_STATE_MATCHMAKING")), "Press Z to %s|cancel",
+                    "Hold START to join hid Press Z to cancel");
+        checkPressZ(1, 0, 2, 3, {{0, 2, 4, 4}}, 0x0F, u8(text.Symbol("MM_STATE_CONNECTION_SUCCESS")), "Hold Z to %s|disconnect",
+                    "Hold START to join hid Hold Z to disconnect");
+        checkPressZ(1, 0, 2, 3, {{0, 2, 4, 4}}, 0x0F, u8(text.Symbol("MM_STATE_ERROR_ENCOUNTERED")), "Press Z to %s|clear error",
+                    "Hold START to join hid Press Z to clear error");
+        checkPressZ(0, 0, 2, 3, {{0, 2, 4, 4}}, 0x0F, idle, "",
+                    "Hold START to join appeared when native Local Teams was disabled");
       }
     }
-    report << "PASS: retail single/multiplayer setup reaches Slippi account/status init; same-team search/connecting text contains exact room; offline rules disabled\n";
+    report << "PASS: retail single/multiplayer setup reaches Slippi account/status init; same-team search/connecting text contains exact room; offline rules disabled; Hold START to join shown iff unadded pads are connected in Selecting state\n";
   }
   catch (...) { Memory::Shutdown(); throw; }
   Memory::Shutdown();
