@@ -56,6 +56,8 @@ private:
   std::array<std::string, 4> identityFiles;
   std::string lobbyCode, error, lastStatus;
   bool Identity(unsigned index, const SlippiUser::UserInfo& fallback, SlippiUser::UserInfo& out, std::string& errorOut);
+  bool ResolveIdentities(const SlippiUser::UserInfo& fallback, std::array<SlippiUser::UserInfo, 4>& out,
+                         std::string& errorOut, const std::string& discoveryDir = std::string());
   SlippiPlayerSelections Selection(unsigned index) const;
   void ShowStatus();
   void Fail(const std::string& message);

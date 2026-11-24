@@ -1,5 +1,6 @@
 #include "Core/Slippi/LocalTeamsSelfTest.h"
 #include "Core/Slippi/LocalTeamsCoordinator.h"
+#include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
 #include "Core/Slippi/SlippiMatchmaking.h"
 #include "SlippiRustExtensions.h"
@@ -670,6 +671,253 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
       File::Delete(iniPath);
     }
     report << "PASS: local teams defaults to enabled native 1-P CSS when local-teams.ini is absent and respects Enabled=False\n";
+    {
+      const std::string iniPath = File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini";
+      std::string slippiDir = File::GetSlippiUserConfigFolder();
+      if (!slippiDir.empty() && slippiDir.back() != '/' && slippiDir.back() != '\\')
+        slippiDir += DIR_SEP;
+      const std::string testRoot = slippiDir + "selftest-identities";
+      const std::string testDir = testRoot + DIR_SEP "primary";
+      const std::string subJsonDir = testDir + DIR_SEP "subdir.json";
+      const std::string extDir = testRoot + DIR_SEP "external";
+      const std::string fewDir = testRoot + DIR_SEP "fewer";
+      const std::string userJsonPath = slippiDir + "user.json";
+      const std::string externalTxtPath = slippiDir + "external-user-json.txt";
+      const std::string decoyPath = slippiDir + "decoy.json";
+
+      const bool hadUserJson = File::Exists(userJsonPath);
+      const bool hadExternalTxt = File::Exists(externalTxtPath);
+      std::string savedUserJson, savedExternalTxt;
+      if (hadUserJson)
+        Require(File::ReadFileToString(userJsonPath, savedUserJson), "failed to back up existing user.json");
+      if (hadExternalTxt)
+        Require(File::ReadFileToString(externalTxtPath, savedExternalTxt), "failed to back up external-user-json.txt");
+
+      struct CleanupGuard
+      {
+        std::string iniPath, testRoot, decoyPath, userJsonPath, externalTxtPath;
+        bool hadUserJson, hadExternalTxt;
+        std::string savedUserJson, savedExternalTxt;
+        ~CleanupGuard()
+        {
+          File::Delete(iniPath);
+          File::Delete(decoyPath);
+          if (!testRoot.empty())
+            File::DeleteDirRecursively(testRoot);
+          if (hadUserJson)
+            File::WriteStringToFile(savedUserJson, userJsonPath);
+          else
+            File::Delete(userJsonPath);
+          if (hadExternalTxt)
+            File::WriteStringToFile(savedExternalTxt, externalTxtPath);
+          else
+            File::Delete(externalTxtPath);
+        }
+      } cleanup{iniPath,     testRoot,      decoyPath,     userJsonPath,
+                externalTxtPath, hadUserJson, hadExternalTxt, savedUserJson, savedExternalTxt};
+
+      Require(File::CreateFullPath(testDir + DIR_SEP), "failed to create identity autodiscovery dir");
+      Require(File::CreateFullPath(subJsonDir + DIR_SEP), "failed to create subdir.json");
+      Require(File::CreateFullPath(extDir + DIR_SEP), "failed to create external dir");
+      Require(File::CreateFullPath(fewDir + DIR_SEP), "failed to create fewer dir");
+
+      auto makeJson = [](const std::string& uid, const std::string& pk, const std::string& name,
+                         const std::string& code, bool snakeCase = false) {
+        if (snakeCase)
+        {
+          return "{\"uid\":\"" + uid + "\",\"play_key\":\"" + pk + "\",\"display_name\":\"" + name +
+                 "\",\"connect_code\":\"" + code + "\"}";
+        }
+        return "{\"uid\":\"" + uid + "\",\"playKey\":\"" + pk + "\",\"displayName\":\"" + name +
+               "\",\"connectCode\":\"" + code + "\"}";
+      };
+
+      SlippiUser::UserInfo fallback;
+      fallback.uid = "uid-main";
+      fallback.playKey = "pk-main";
+      fallback.displayName = "Main";
+      fallback.connectCode = "MAIN#1";
+
+      Require(File::WriteStringToFile(makeJson("uid-main", "pk-main", "MainFile", "MF#0"), testDir + DIR_SEP "user.json"),
+              "write user.json");
+      Require(File::WriteStringToFile("[{\"connectCode\":\"FOO#1\"}]", testDir + DIR_SEP "direct-codes.json"),
+              "write direct-codes.json");
+      Require(File::WriteStringToFile("{\"volume\":50}", testDir + DIR_SEP "settings.json"), "write settings.json");
+      Require(File::WriteStringToFile("{broken json", testDir + DIR_SEP "malformed.json"), "write malformed.json");
+      Require(File::WriteStringToFile(makeJson("uid-empty-pk", "", "EmptyPK", "EP#1"), testDir + DIR_SEP "empty_pk.json"),
+              "write empty_pk.json");
+      Require(File::WriteStringToFile(makeJson("", "pk-empty-uid", "EmptyUID", "EU#1"), testDir + DIR_SEP "empty_uid.json"),
+              "write empty_uid.json");
+      Require(File::WriteStringToFile(makeJson("uid-main", "pk-dup-main", "DupMain", "DM#1"),
+                                      testDir + DIR_SEP "a_dup_main.json"),
+              "write a_dup_main.json");
+      Require(File::WriteStringToFile(makeJson("uid-nested", "pk-nested", "Nested", "NST#1"),
+                                      subJsonDir + DIR_SEP "inside.json"),
+              "write subdir.json/inside.json");
+      Require(File::WriteStringToFile(makeJson("uid-txt", "pk-txt", "Txt", "TXT#1"), testDir + DIR_SEP "readme.txt"),
+              "write readme.txt");
+      Require(File::WriteStringToFile(makeJson("uid-alpha", "pk-alpha", "Alpha", "ALP#1"), testDir + DIR_SEP "Alpha.json"),
+              "write Alpha.json");
+      Require(File::WriteStringToFile(makeJson("uid-alpha", "pk-dup-alpha", "DupAlpha", "DAL#1"),
+                                      testDir + DIR_SEP "az_dup_alpha.json"),
+              "write az_dup_alpha.json");
+      Require(File::WriteStringToFile(makeJson("uid-bravo", "pk-bravo", "Bravo", "BRV#2", true),
+                                      testDir + DIR_SEP "bravo.JSON"),
+              "write bravo.JSON");
+      Require(File::WriteStringToFile(makeJson("uid-charlie", "pk-charlie", "Charlie", "CHL#3"),
+                                      testDir + DIR_SEP "charlie.json"),
+              "write charlie.json");
+
+      // 1. Pure autodiscovery for 4 players with logged-in fallback.
+      File::Delete(iniPath);
+      LocalTeamsCoordinator pure(0, nullptr, [] { return u16(0x8); });
+      pure.state.count = 4;
+      std::array<SlippiUser::UserInfo, 4> resolved;
+      std::string identityErr;
+      Require(pure.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("pure 4-player autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-alpha" && resolved[2].uid == "uid-bravo" &&
+                  resolved[2].displayName == "Bravo" && resolved[2].connectCode == "BRV#2" &&
+                  resolved[3].uid == "uid-charlie",
+              "pure 4-player autodiscovery produced unexpected slot order");
+
+      // 2. Removing the duplicate-of-main file leaves 3 unique non-user identities, so empty fallback fails loudly.
+      File::Delete(testDir + DIR_SEP "a_dup_main.json");
+      SlippiUser::UserInfo emptyFallback;
+      Require(!pure.ResolveIdentities(emptyFallback, resolved, identityErr, testDir) &&
+                  identityErr == "Log in before searching",
+              "expected Log in before searching when fallback is empty and only 3 unique identities exist");
+
+      // 3. Adding a 4th discovered file succeeds with empty fallback.
+      Require(File::WriteStringToFile(makeJson("uid-delta", "pk-delta", "Delta", "DLT#4"), testDir + DIR_SEP "delta.json"),
+              "write delta.json");
+      Require(pure.ResolveIdentities(emptyFallback, resolved, identityErr, testDir),
+              ("4-player autodiscovery without fallback failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-alpha" && resolved[1].uid == "uid-bravo" && resolved[2].uid == "uid-charlie" &&
+                  resolved[3].uid == "uid-delta",
+              "4-player autodiscovery without fallback order mismatch");
+
+      // 4. Explicit Identity2 inside discovery dir avoids duplicate UID in remaining discovered slots.
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity2=" + testDir + DIR_SEP "charlie.json\n", iniPath);
+      LocalTeamsCoordinator explicitInDir(0, nullptr, [] { return u16(0x8); });
+      explicitInDir.state.count = 4;
+      Require(explicitInDir.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("explicit Identity2 in discovery dir failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-charlie" && resolved[2].uid == "uid-alpha" &&
+                  resolved[3].uid == "uid-bravo",
+              "explicit Identity2 in discovery dir order mismatch");
+
+      // 5. Explicit Identity1 and Identity2 outside discovery dir take precedence; Identity2 claiming fallback UID
+      // suppresses duplicating fallback into P1.
+      const std::string ext1Path = extDir + DIR_SEP "p1_override.json";
+      const std::string ext2Path = extDir + DIR_SEP "p2_override.json";
+      Require(File::WriteStringToFile(makeJson("uid-ext1", "pk-ext1", "Ext1", "EX#1"), ext1Path), "write p1_override.json");
+      Require(File::WriteStringToFile(makeJson("uid-ext2", "pk-ext2", "Ext2", "EX#2"), ext2Path), "write p2_override.json");
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity1=" + ext1Path + "\nIdentity2=" + ext2Path + "\n",
+                              iniPath);
+      LocalTeamsCoordinator explicitExt(0, nullptr, [] { return u16(0x8); });
+      explicitExt.state.count = 4;
+      Require(explicitExt.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("explicit external overrides failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-ext1" && resolved[1].uid == "uid-ext2" && resolved[2].uid == "uid-alpha" &&
+                  resolved[3].uid == "uid-bravo",
+              "explicit external overrides order mismatch");
+
+      const std::string extMainDupPath = extDir + DIR_SEP "main_alias.json";
+      Require(File::WriteStringToFile(makeJson("uid-main", "pk-main", "MainAlias", "MA#1"), extMainDupPath),
+              "write main_alias.json");
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity2=" + extMainDupPath + "\n", iniPath);
+      LocalTeamsCoordinator claimedFallback(0, nullptr, [] { return u16(0x8); });
+      claimedFallback.state.count = 4;
+      Require(claimedFallback.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("explicit Identity2 claiming fallback UID failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-alpha" && resolved[1].uid == "uid-main" && resolved[2].uid == "uid-bravo" &&
+                  resolved[3].uid == "uid-charlie",
+              "explicit Identity2 claiming fallback UID still assigned fallback to P1");
+
+      // 6. Missing or unreadable configured identities fall back to autodiscovery, then to primary user.
+      const std::string emptyDir = testRoot + DIR_SEP "empty";
+      Require(File::CreateFullPath(emptyDir + DIR_SEP), "failed to create empty discovery dir");
+
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity1=" + extDir + DIR_SEP "missing.json\n", iniPath);
+      LocalTeamsCoordinator missingId1(0, nullptr, [] { return u16(0x8); });
+      missingId1.state.count = 2;
+      Require(missingId1.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("missing Identity1 fallback to autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-alpha" && resolved[1].uid == "uid-bravo",
+              "missing Identity1 did not fall back to autodiscovered identities");
+
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity2=" + extDir + DIR_SEP "missing.json\n", iniPath);
+      LocalTeamsCoordinator missingId2(0, nullptr, [] { return u16(0x8); });
+      missingId2.state.count = 3;
+      Require(missingId2.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("missing Identity2 fallback to autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-alpha" && resolved[2].uid == "uid-bravo",
+              "missing Identity2 did not fall back to autodiscovered identities");
+
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity2=" + testDir + DIR_SEP "malformed.json\n", iniPath);
+      LocalTeamsCoordinator malformedId2(0, nullptr, [] { return u16(0x8); });
+      malformedId2.state.count = 2;
+      Require(malformedId2.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("malformed Identity2 fallback to autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-alpha",
+              "malformed Identity2 did not fall back to autodiscovered identity");
+
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity2=" + subJsonDir + "\n", iniPath);
+      LocalTeamsCoordinator dirId2(0, nullptr, [] { return u16(0x8); });
+      dirId2.state.count = 2;
+      Require(dirId2.ResolveIdentities(fallback, resolved, identityErr, testDir),
+              ("directory Identity2 fallback to autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-alpha",
+              "directory Identity2 did not fall back to autodiscovered identity");
+
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity1=" + extDir + DIR_SEP "missing1.json\nIdentity2=" +
+                                  extDir + DIR_SEP "missing2.json\n",
+                              iniPath);
+      LocalTeamsCoordinator missingAllNoDiscovery(0, nullptr, [] { return u16(0x8); });
+      missingAllNoDiscovery.state.count = 2;
+      Require(missingAllNoDiscovery.ResolveIdentities(fallback, resolved, identityErr, emptyDir),
+              ("missing identities without autodiscovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-main",
+              "missing identities without autodiscovery did not fall back to primary user");
+      Require(!missingAllNoDiscovery.ResolveIdentities(emptyFallback, resolved, identityErr, emptyDir) &&
+                  identityErr == "Log in before searching",
+              "missing identities without autodiscovery or login did not require login");
+
+      // 7. Fewer discovered files fall back to primary user for remaining slots.
+      File::Delete(iniPath);
+      Require(File::WriteStringToFile(makeJson("uid-only", "pk-only", "Only", "ONL#1"), fewDir + DIR_SEP "only.json"),
+              "write only.json");
+      LocalTeamsCoordinator fewer(0, nullptr, [] { return u16(0x8); });
+      fewer.state.count = 3;
+      Require(fewer.ResolveIdentities(fallback, resolved, identityErr, fewDir),
+              ("fewer discovered identities failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-only" && resolved[2].uid == "uid-main",
+              "fewer discovered identities did not fall back to primary user");
+
+      // 8. external-user-json.txt parent-directory resolution (without explicit discoveryDir).
+      const std::string extTargetDir = testRoot + DIR_SEP "external-target";
+      Require(File::CreateFullPath(extTargetDir + DIR_SEP), "failed to create external-target dir");
+      File::Delete(userJsonPath);
+      Require(File::WriteStringToFile(makeJson("uid-decoy", "pk-decoy", "Decoy", "DCY#1"), decoyPath), "write decoy.json");
+      Require(File::WriteStringToFile(makeJson("uid-ext-user", "pk-ext-user", "ExtUser", "EXU#1"),
+                                      extTargetDir + DIR_SEP "user.json"),
+              "write external user.json");
+      Require(File::WriteStringToFile(makeJson("uid-partner", "pk-partner", "Partner", "PRT#2"),
+                                      extTargetDir + DIR_SEP "partner.json"),
+              "write external partner.json");
+      const std::string extTxtBody = std::string("\xEF\xBB\xBF  ") + extTargetDir + DIR_SEP "user.json \r\n";
+      Require(File::WriteStringToFile(extTxtBody, externalTxtPath), "write external-user-json.txt");
+
+      File::Delete(iniPath);
+      LocalTeamsCoordinator viaExternalTxt(0, nullptr, [] { return u16(0x8); });
+      viaExternalTxt.state.count = 2;
+      Require(viaExternalTxt.ResolveIdentities(fallback, resolved, identityErr),
+              ("external-user-json.txt discovery failed: " + identityErr).c_str());
+      Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-partner",
+              "external-user-json.txt did not discover from external user.json directory");
+    }
+    report << "PASS: local teams identity autodiscovery respects explicit overrides and falls back cleanly on invalid/missing files\n";
   }
   catch (const std::exception& error) { report << "FAIL: " << error.what() << '\n'; result = 1; }
   enet_deinitialize();

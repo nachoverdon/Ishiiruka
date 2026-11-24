@@ -1,11 +1,16 @@
 #include "Core/Slippi/LocalTeamsCoordinator.h"
+#include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
 #include "Common/IniFile.h"
 #include "Common/StringUtil.h"
 #include "Common/Logging/Log.h"
 #include "VideoCommon/OnScreenDisplay.h"
+#include <algorithm>
+#include <cctype>
 #include <fstream>
+#include <set>
 #include <sstream>
+#include <vector>
 
 LocalTeamsCoordinator::LocalTeamsCoordinator(uintptr_t device_, SlippiUser* user_, std::function<u16()> randomStage_)
     : randomStage(std::move(randomStage_)), device(device_), user(user_)
@@ -215,6 +220,150 @@ void LocalTeamsCoordinator::SetSearchCode(const std::string& shiftJisCode)
   lobbyCode = SHIFTJISToUTF8(shiftJisCode);
 }
 
+namespace
+{
+std::string StripTrailingSeparators(std::string path)
+{
+  while (path.size() > 1 && (path.back() == '/' || path.back() == '\\'))
+  {
+#ifdef _WIN32
+    if (path.size() == 3 && path[1] == ':')
+      break;
+#endif
+    path.pop_back();
+  }
+  return path;
+}
+
+std::string TrimWhitespaceAndBom(std::string text)
+{
+  auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+  auto trimBoth = [&](std::string& s) {
+    while (!s.empty() && isSpace(static_cast<unsigned char>(s.front())))
+      s.erase(s.begin());
+    while (!s.empty() && isSpace(static_cast<unsigned char>(s.back())))
+      s.pop_back();
+  };
+  trimBoth(text);
+  if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+      static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
+  {
+    text.erase(0, 3);
+    trimBoth(text);
+  }
+  return text;
+}
+
+std::string ToLowerAscii(std::string text)
+{
+  for (char& ch : text)
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  return text;
+}
+
+bool IsJsonFileName(const std::string& name)
+{
+  const std::string lower = ToLowerAscii(name);
+  return lower.size() > 5 && lower.compare(lower.size() - 5, 5, ".json") == 0;
+}
+
+std::string ParentDirectory(const std::string& path)
+{
+  const std::string clean = StripTrailingSeparators(path);
+  const size_t slash = clean.find_last_of("/\\");
+  if (slash == std::string::npos)
+    return {};
+  if (slash == 0)
+    return clean.substr(0, 1);
+#ifdef _WIN32
+  if (slash == 2 && clean[1] == ':')
+    return clean.substr(0, 3);
+#endif
+  return clean.substr(0, slash);
+}
+
+std::string IdentitySearchDirectory(const std::string& overrideDir)
+{
+  if (!overrideDir.empty())
+  {
+    const std::string clean = StripTrailingSeparators(overrideDir);
+    return File::IsDirectory(clean) ? clean : std::string();
+  }
+
+  const std::string slippiDir = StripTrailingSeparators(File::GetSlippiUserConfigFolder());
+  if (slippiDir.empty())
+    return {};
+
+  const std::string localUserJson = slippiDir + DIR_SEP "user.json";
+  if (File::Exists(localUserJson) && !File::IsDirectory(localUserJson))
+    return slippiDir;
+
+  const std::string externalFile = slippiDir + DIR_SEP "external-user-json.txt";
+  if (File::Exists(externalFile))
+  {
+    std::string target;
+    if (!File::ReadFileToString(externalFile, target))
+      return {};
+    target = TrimWhitespaceAndBom(std::move(target));
+    if (target.empty())
+      return {};
+    const std::string parent = ParentDirectory(target);
+    return (!parent.empty() && File::IsDirectory(parent)) ? parent : std::string();
+  }
+
+  return File::IsDirectory(slippiDir) ? slippiDir : std::string();
+}
+
+bool ReadIdentityString(const json& value, const char* primaryKey, const char* aliasKey, std::string& dst)
+{
+  auto tryKey = [&](const char* key) {
+    if (!key)
+      return false;
+    auto it = value.find(key);
+    if (it == value.end() || !it->is_string())
+      return false;
+    dst = it->get<std::string>();
+    return true;
+  };
+  return tryKey(primaryKey) || tryKey(aliasKey);
+}
+
+enum class IdentityParseResult
+{
+  Ok,
+  OpenFailed,
+  Invalid,
+};
+
+IdentityParseResult ParseIdentityFile(const std::string& path, const SlippiUser::UserInfo& fallback,
+                                        SlippiUser::UserInfo& out)
+{
+  if (File::IsDirectory(path))
+    return IdentityParseResult::OpenFailed;
+
+  std::ifstream input(path);
+  if (!input)
+    return IdentityParseResult::OpenFailed;
+
+  json value = json::parse(input, nullptr, false);
+  if (value.is_discarded() || !value.is_object())
+    return IdentityParseResult::Invalid;
+
+  auto identity = fallback;
+  if (!ReadIdentityString(value, "uid", nullptr, identity.uid) ||
+      !ReadIdentityString(value, "playKey", "play_key", identity.playKey) ||
+      !ReadIdentityString(value, "displayName", "display_name", identity.displayName) ||
+      !ReadIdentityString(value, "connectCode", "connect_code", identity.connectCode))
+    return IdentityParseResult::Invalid;
+
+  if (identity.uid.empty() || identity.playKey.empty())
+    return IdentityParseResult::Invalid;
+
+  out = std::move(identity);
+  return IdentityParseResult::Ok;
+}
+}  // namespace
+
 bool LocalTeamsCoordinator::Identity(unsigned index, const SlippiUser::UserInfo& fallback,
                                      SlippiUser::UserInfo& out, std::string& errorOut)
 {
@@ -223,33 +372,132 @@ bool LocalTeamsCoordinator::Identity(unsigned index, const SlippiUser::UserInfo&
     out = fallback;
     return true;
   }
-  std::ifstream input(identityFiles[index]);
-  if (!input)
+  const IdentityParseResult result = ParseIdentityFile(identityFiles[index], fallback, out);
+  if (result == IdentityParseResult::OpenFailed)
   {
     errorOut = "Could not open configured identity " + std::to_string(index + 1);
     return false;
   }
-  json value = json::parse(input, nullptr, false);
-  if (value.is_discarded() || !value.is_object())
+  if (result == IdentityParseResult::Invalid)
   {
     errorOut = "Invalid configured identity " + std::to_string(index + 1);
     return false;
   }
-  auto readString = [&](const char* key, std::string& dst) {
-    auto it = value.find(key);
-    if (it == value.end() || !it->is_string())
-      return false;
-    dst = it->get<std::string>();
+  return true;
+}
+
+bool LocalTeamsCoordinator::ResolveIdentities(const SlippiUser::UserInfo& fallback,
+                                              std::array<SlippiUser::UserInfo, 4>& out,
+                                              std::string& errorOut, const std::string& discoveryDir)
+{
+  const unsigned count = std::min<unsigned>(state.count, 4);
+  if (count == 0)
     return true;
-  };
-  auto identity = fallback;
-  if (!readString("uid", identity.uid) || !readString("playKey", identity.playKey) ||
-      !readString("displayName", identity.displayName) || !readString("connectCode", identity.connectCode))
+
+  std::array<bool, 4> assigned{};
+  std::set<std::string> usedUids;
+
+  // Pass 1: Explicit Identity1..Identity<count> take precedence; unreadable/invalid paths fall back below.
+  for (unsigned i = 0; i < count; ++i)
   {
-    errorOut = "Invalid configured identity " + std::to_string(index + 1);
-    return false;
+    if (identityFiles[i].empty())
+      continue;
+    std::string slotError;
+    if (!Identity(i, fallback, out[i], slotError))
+    {
+      WARN_LOG(SLIPPI_ONLINE, "[LocalTeams] %s (%s); falling back to autodiscovery/primary user", slotError.c_str(),
+               identityFiles[i].c_str());
+      continue;
+    }
+    assigned[i] = true;
+    usedUids.insert(out[i].uid);
   }
-  out = std::move(identity);
+
+  // Pass 2: Player 1 defaults to fallback if Identity1 is omitted and fallback UID was not claimed in Pass 1.
+  if (!assigned[0] && identityFiles[0].empty() && !fallback.uid.empty() && !fallback.playKey.empty() &&
+      usedUids.count(fallback.uid) == 0)
+  {
+    out[0] = fallback;
+    assigned[0] = true;
+    usedUids.insert(fallback.uid);
+  }
+
+  // Pass 3: Autodiscover .json files placed next to user.json for remaining unassigned slots.
+  bool needDiscovery = false;
+  for (unsigned i = 0; i < count; ++i)
+  {
+    if (!assigned[i])
+    {
+      needDiscovery = true;
+      break;
+    }
+  }
+
+  if (needDiscovery)
+  {
+    const std::string dir = IdentitySearchDirectory(discoveryDir);
+    if (!dir.empty())
+    {
+      File::FSTEntry tree = File::ScanDirectoryTree(dir, false);
+      struct DiscoveredFile
+      {
+        std::string lowerName;
+        std::string virtualName;
+        std::string physicalName;
+      };
+      std::vector<DiscoveredFile> candidates;
+      for (const auto& entry : tree.children)
+      {
+        if (entry.isDirectory || !IsJsonFileName(entry.virtualName))
+          continue;
+        std::string lower = ToLowerAscii(entry.virtualName);
+        if (lower == "user.json")
+          continue;
+        candidates.push_back({std::move(lower), entry.virtualName, entry.physicalName});
+      }
+      std::sort(candidates.begin(), candidates.end(), [](const DiscoveredFile& a, const DiscoveredFile& b) {
+        if (a.lowerName != b.lowerName)
+          return a.lowerName < b.lowerName;
+        if (a.virtualName != b.virtualName)
+          return a.virtualName < b.virtualName;
+        return a.physicalName < b.physicalName;
+      });
+
+      unsigned nextSlot = 0;
+      for (const auto& candidate : candidates)
+      {
+        while (nextSlot < count && assigned[nextSlot])
+          ++nextSlot;
+        if (nextSlot >= count)
+          break;
+
+        SlippiUser::UserInfo parsed;
+        if (ParseIdentityFile(candidate.physicalName, fallback, parsed) != IdentityParseResult::Ok)
+          continue;
+        if (usedUids.count(parsed.uid) != 0)
+          continue;
+
+        out[nextSlot] = std::move(parsed);
+        assigned[nextSlot] = true;
+        usedUids.insert(out[nextSlot].uid);
+        INFO_LOG(SLIPPI_ONLINE, "[LocalTeams] Autodiscovered identity %s for player %u (%s)",
+                 candidate.virtualName.c_str(), nextSlot + 1, out[nextSlot].uid.c_str());
+      }
+    }
+  }
+
+  // Pass 4: Fallback to primary user for any remaining slots and verify required auth fields.
+  for (unsigned i = 0; i < count; ++i)
+  {
+    if (!assigned[i])
+      out[i] = fallback;
+    if (out[i].uid.empty() || out[i].playKey.empty())
+    {
+      errorOut = "Log in before searching";
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -281,18 +529,10 @@ bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& prim
   // Read every identity before starting any thread. Never log play keys.
   std::array<SlippiUser::UserInfo, 4> identities;
   std::string identityError;
-  for (unsigned i = 0; i < state.count; ++i)
+  if (!ResolveIdentities(fallback, identities, identityError))
   {
-    if (!Identity(i, fallback, identities[i], identityError))
-    {
-      Fail(identityError);
-      return false;
-    }
-    if (identities[i].uid.empty() || identities[i].playKey.empty())
-    {
-      Fail("Log in before searching");
-      return false;
-    }
+    Fail(identityError);
+    return false;
   }
   validated = published = false;
   state.phase = LocalTeams::Phase::Searching;
