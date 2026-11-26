@@ -177,7 +177,17 @@ bool LocalTeamsCoordinator::ChangeCount(const u8* payload)
   }
   if (action & 0x80)
   {
-    if (!state.Resize(payload[0])) return false;
+    if (payload[0] != state.count)
+    {
+      if (!state.Resize(payload[0])) return false;
+    }
+    else
+    {
+      state.joinArmed = 0;
+      state.joinPreviousButtons.fill(0);
+      state.lastJoinFrame = UINT32_MAX;
+      state.ResetSelection();
+    }
     state.ClaimAddedPort(action & 3);
   }
   else if (action & 0x40)
@@ -209,8 +219,10 @@ SlippiPlayerSelections LocalTeamsCoordinator::PrimarySelection() const { return 
 
 std::string LocalTeamsCoordinator::SearchCode() const
 {
-  // Match the stock connect-code UI's full-width Shift-JIS hashtag.
-  return ReplaceAll(UTF8ToSHIFTJIS(lobbyCode), "#", std::string("\x81\x94", 2));
+  // Match the stock connect-code UI's full-width Shift-JIS symbols (# and %).
+  std::string encoded = UTF8ToSHIFTJIS(lobbyCode);
+  encoded = ReplaceAll(encoded, "#", std::string("\x81\x94", 2));
+  return ReplaceAll(encoded, "%", std::string("\x81\x93", 2));
 }
 
 void LocalTeamsCoordinator::SetSearchCode(const std::string& shiftJisCode)
@@ -487,18 +499,34 @@ bool LocalTeamsCoordinator::ResolveIdentities(const SlippiUser::UserInfo& fallba
   }
 
   // Pass 4: Fallback to primary user for any remaining slots and verify required auth fields.
+  bool allValid = true;
   for (unsigned i = 0; i < count; ++i)
   {
     if (!assigned[i])
       out[i] = fallback;
     if (out[i].uid.empty() || out[i].playKey.empty())
-    {
-      errorOut = "Log in before searching";
-      return false;
-    }
+      allValid = false;
+  }
+  if (!allValid)
+  {
+    errorOut = "Log in before searching";
+    return false;
   }
 
   return true;
+}
+
+std::array<std::string, 4> LocalTeamsCoordinator::DisplayNames(const std::string& discoveryDir)
+{
+  const SlippiUser::UserInfo fallback = user ? user->GetUserInfo() : SlippiUser::UserInfo{};
+  std::array<SlippiUser::UserInfo, 4> identities{};
+  std::string unusedError;
+  ResolveIdentities(fallback, identities, unusedError, discoveryDir);
+  std::array<std::string, 4> names{};
+  const unsigned count = std::min<unsigned>(state.count, 4);
+  for (unsigned i = 0; i < count; ++i)
+    names[i] = identities[i].displayName;
+  return names;
 }
 
 bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& primary)
@@ -514,6 +542,7 @@ bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& prim
   if (loopback)
   {
     validated = published = false;
+    lobbySize = 0;
     primary = std::make_unique<SlippiMatchmaking>(device, user);
     primary->SetupLocalTeamsLoopback(0, u16(basePort));
     for (unsigned i = 1; i < 4; ++i)
@@ -535,6 +564,7 @@ bool LocalTeamsCoordinator::BeginSearch(std::unique_ptr<SlippiMatchmaking>& prim
     return false;
   }
   validated = published = false;
+  lobbySize = 0;
   state.phase = LocalTeams::Phase::Searching;
   state.startArmed = false;
   state.nativeArmed = state.nativeHeld = 0;
@@ -573,42 +603,53 @@ SlippiMatchmaking::ProcessState LocalTeamsCoordinator::Tick(SlippiMatchmaking& p
   if (!validated)
   {
     const auto reference = primary.GetMatchmakeResult();
+    const unsigned expectedPlayers = unsigned(reference.players.size());
+    if (expectedPlayers < 2 || expectedPlayers > 4 || expectedPlayers < state.count)
+    { Fail("Sessions received different lobbies or duplicate slots"); return MM::ERROR_ENCOUNTERED; }
     unsigned assigned = 0;
     for (unsigned i = 0; i < state.count; ++i)
     {
       const auto result = clients[i]->GetMatchmakeResult();
       const int slot = clients[i]->LocalPlayerIndex();
-      if (slot < 0 || slot > 3 || (assigned & (1u << slot)) || result.id != reference.id || result.players.size() != 4)
+      if (slot < 0 || unsigned(slot) >= expectedPlayers || (assigned & (1u << slot)) ||
+          result.id != reference.id || result.players.size() != expectedPlayers)
       { Fail("Sessions received different lobbies or duplicate slots"); return MM::ERROR_ENCOUNTERED; }
       assigned |= 1u << slot;
       localSlots[i] = unsigned(slot);
       std::array<std::string, 4> a{}, b{};
       for (const auto& player : reference.players)
       {
-        if (player.port < 1 || player.port > 4) { Fail("Invalid primary roster"); return MM::ERROR_ENCOUNTERED; }
+        if (player.port < 1 || unsigned(player.port) > expectedPlayers)
+        { Fail("Invalid primary roster"); return MM::ERROR_ENCOUNTERED; }
         a[player.port - 1] = player.uid + ":" + player.connectCode;
       }
       for (const auto& player : result.players)
       {
-        if (player.port < 1 || player.port > 4) { Fail("Invalid roster"); return MM::ERROR_ENCOUNTERED; }
+        if (player.port < 1 || unsigned(player.port) > expectedPlayers)
+        { Fail("Invalid roster"); return MM::ERROR_ENCOUNTERED; }
         b[player.port - 1] = player.uid + ":" + player.connectCode;
       }
       if (!LocalTeams::CompatibleRoster(a, b)) { Fail("Local sessions disagree about the roster"); return MM::ERROR_ENCOUNTERED; }
       INFO_LOG(SLIPPI_ONLINE, "[LocalTeams] local %u controller %u -> Melee slot %d", i + 1, state.ports[i] + 1, slot + 1);
     }
     for (unsigned i = 1; i < state.count; ++i) guests[i - 1].netplay = clients[i]->GetNetplayClient();
+    lobbySize = expectedPlayers;
     validated = true;
     state.phase = LocalTeams::Phase::Waiting;
     ShowStatus();
   }
+  const unsigned expectedPlayers = lobbySize >= 2 ? lobbySize : unsigned(primary.RemotePlayerCount() + 1);
+  const unsigned expectedRemote = expectedPlayers > 0 ? expectedPlayers - 1 : 0;
   for (unsigned i = 0; i < state.count; ++i)
   {
     auto* client = i ? guests[i - 1].netplay.get() : netplay;
     if (!client && i == 0) continue; // Primary ownership transfers just after initial Tick.
     if (!client) { Fail("Local P" + std::to_string(i + 1) + " session is missing"); return MM::ERROR_ENCOUNTERED; }
     const auto activePlayers = client->GetActivePlayerIndices();
-    if (activePlayers.size() == 3 && client->GetSlippiConnectStatus() == SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_CONNECTED) continue;
-    for (unsigned slot = 0; slot < 4; ++slot)
+    if (activePlayers.size() == expectedRemote &&
+        client->GetSlippiConnectStatus() == SlippiNetplayClient::SlippiConnectStatus::NET_CONNECT_STATUS_CONNECTED)
+      continue;
+    for (unsigned slot = 0; slot < expectedPlayers; ++slot)
     {
       if (slot == localSlots[i] || activePlayers.count(u8(slot))) continue;
       const auto label = primary.GetPlayerName(u8(slot));
@@ -645,14 +686,15 @@ void LocalTeamsCoordinator::PublishSelections(SlippiNetplayClient& primary)
 bool LocalTeamsCoordinator::AllReady(SlippiNetplayClient& primary)
 {
   if (!published || !state.AllConfirmed()) return false;
+  const unsigned expectedRemote = lobbySize >= 2 ? lobbySize - 1 : unsigned(SLIPPI_REMOTE_PLAYER_MAX);
   for (unsigned i = 0; i < state.count; ++i)
   {
     auto* client = i == 0 ? &primary : guests[i - 1].netplay.get();
-    if (!client || client->GetActivePlayerIndices().size() != 3) return false;
+    if (!client || client->GetActivePlayerIndices().size() != expectedRemote) return false;
     auto info = client->GetMatchInfoSnapshot();
     if (!info.localPlayerSelections.isCharacterSelected) return false;
-    for (const auto& selection : info.remotePlayerSelections)
-      if (!selection.isCharacterSelected) return false;
+    for (unsigned r = 0; r < expectedRemote; ++r)
+      if (!info.remotePlayerSelections[r].isCharacterSelected) return false;
   }
   return true;
 }
@@ -723,6 +765,7 @@ void LocalTeamsCoordinator::Cleanup()
   for (auto& guest : guests) { guest.matchmaking.reset(); guest.netplay.reset(); guest.previous.fill(0); }
   state.ResetSelection();
   validated = published = false;
+  lobbySize = 0;
   lobbyDisconnected = false;
   localSlots.fill(4);
   error.clear(); lastStatus.clear();

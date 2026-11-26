@@ -2,6 +2,7 @@
 #include "Core/Slippi/LocalTeamsCoordinator.h"
 #include "Common/CommonPaths.h"
 #include "Common/FileUtil.h"
+#include "Common/StringUtil.h"
 #include "Core/Slippi/SlippiMatchmaking.h"
 #include "SlippiRustExtensions.h"
 #include "Core/ConfigManager.h"
@@ -576,19 +577,23 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
       Require(!status[35] && status[1]==1,"Start added a card before 31 frames");
       status=poll(); Require(status[35]==0x80 && status[34]==2 && status[1]==1,"long Start did not request an atomic roster reload");
       u8 change[17]={2, 2,1,0,1};
-      Require(join.ChangeCount(change) && join.state.ports[1]==0 && join.state.saved==1 && join.state.selections[0].character==2,
-              "automatic join lost the existing unready pick or controller owner");
-      Require(!join.state.InputEnabled(1),"joining Start leaked across the CSS reload");
+      Require(join.ChangeCount(change) && join.state.count==2 &&
+              join.state.ports[0]==0 && join.state.ports[1]==3 &&
+              join.state.saved==2 && join.state.selections[1].character==2 &&
+              join.state.selections[0].character==0,
+              "automatic join did not sort ports cleanly or lost existing pick");
+      Require(!join.state.InputEnabled(0),"joining Start leaked across the CSS reload");
       raw[2]=80; status=poll();
-      Require(status[33]==2 && !(status[10]&2),"held joining Start escaped suppression or armed readiness");
+      Require(status[33]==1 && !(status[10]&1),"held joining Start escaped suppression or armed readiness");
       raw[0]=0; status=poll();
-      Require(join.state.InputEnabled(1) && status[33]==0 && raw[2]==80,"releasing Start while holding the stick did not enable the new card");
+      Require(join.state.InputEnabled(0) && status[33]==0 && raw[2]==80,"releasing Start while holding the stick did not enable the new card");
       raw.fill(0); poll(); raw[0]=2;
       for(unsigned i=0;i<30;++i)status=poll();
       Require(!status[35],"teammate left before 31 frames");
       status=poll();
-      Require(status[35]==0x41 && status[34]==1,"teammate's long B did not request removing their own card");
-      change[0]=1; change[5]=20; change[6]=2; change[7]=1; change[8]=1;
+      Require(status[35]==0x40 && status[34]==1,"teammate's long B did not request removing their own sorted slot 0 card");
+      change[0]=1; change[1]=20; change[2]=2; change[3]=1; change[4]=1;
+      change[5]=2; change[6]=1; change[7]=0; change[8]=1;
       Require(join.ChangeCount(change) && join.state.count==1 && join.state.ports[0]==3 && join.state.saved==1 && join.state.selections[0].character==2,
               "teammate removal lost the main controller or its pick");
       raw.fill(0); poll(); join.validated=true; raw[12]=0x10;
@@ -635,6 +640,128 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
               "busy main exit was rejected, retained cards or disabled session cleanup");
     }
     report << "PASS: main 31-frame B hold exits idle/searching/connected CSS on every controller port; busy teammate roster changes remain blocked\n";
+    {
+      // 1) Reverse/mixed Start-hold join order P4 -> P2 -> P1 -> P3 stays strictly sorted and preserves picks.
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=1\nBasePort=49120\n",
+                              File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini");
+      LocalTeamsCoordinator ordered(0, nullptr, [] { return u16(0x8); });
+      std::array<u8, 48> raw{};
+      std::array<u8, 8> sampled{};
+      u32 frame = 10;
+      auto poll = [&](u8 mode = u8(SlippiMatchmaking::TEAMS)) {
+        for (unsigned i = 0; i < 4; ++i)
+        {
+          sampled[2 * i] = raw[12 * i];
+          sampled[2 * i + 1] = raw[12 * i + 1];
+        }
+        return ordered.Poll(mode, sampled.data(), raw.data(), 3, frame++);
+      };
+      poll(u8(SlippiMatchmaking::TEAMS | 0x20));
+      Require(ordered.state.count == 1 && ordered.state.ports[0] == 3, "entering port 4 did not start in slot 0");
+
+      auto holdStartAdd = [&](unsigned port, const std::array<u8, 17>& payload) {
+        raw.fill(0);
+        poll();
+        raw[12 * port] = 0x10;
+        for (unsigned i = 0; i < 30; ++i)
+          Require(!poll()[35], "Start join triggered early");
+        const auto s = poll();
+        Require(s[35] == (0x80 | port) && s[34] == ordered.state.count + 1, "Start join did not request sorted add");
+        Require(ordered.ChangeCount(payload.data()), "ChangeCount rejected sorted add");
+        raw.fill(0);
+        poll();
+      };
+      // P4 picks Marth (9,1,0); P2 joins ahead -> {1, 3}
+      holdStartAdd(1, {2, 9, 1, 0, 1});
+      Require(ordered.state.count == 2 && ordered.state.ports == std::array<unsigned, 4>{{1, 3, 4, 4}} &&
+                  ordered.state.JoinedMask() == 3 && ordered.state.saved == 2 &&
+                  ordered.state.selections[1].character == 9 && ordered.state.selections[0].character == 0,
+              "P2 joining after P4 did not insert ahead and shift P4 pick");
+      // P2 picks Fox (2,0,1), P4 keeps Marth (9,1,0); P1 joins ahead -> {0, 1, 3}
+      holdStartAdd(0, {3, 2, 0, 1, 1, 9, 1, 0, 1});
+      Require(ordered.state.count == 3 && ordered.state.ports == std::array<unsigned, 4>{{0, 1, 3, 4}} &&
+                  ordered.state.JoinedMask() == 7 && ordered.state.saved == 6 &&
+                  ordered.state.selections[1].character == 2 && ordered.state.selections[2].character == 9,
+              "P1 joining after P2/P4 did not preserve port order and existing picks");
+      // P1 picks Falco (20,2,2); P3 joins into slot 2 -> {0, 1, 2, 3}
+      holdStartAdd(2, {4, 20, 2, 2, 1, 2, 0, 1, 1, 9, 1, 0, 1});
+      Require(ordered.state.count == 4 && ordered.state.ports == std::array<unsigned, 4>{{0, 1, 2, 3}} &&
+                  ordered.state.JoinedMask() == 15 && ordered.state.saved == 11 &&
+                  ordered.state.selections[0].character == 20 && ordered.state.selections[1].character == 2 &&
+                  ordered.state.selections[2].character == 0 && ordered.state.selections[3].character == 9,
+              "P3 joining into middle slot did not keep P1/P2/P3/P4 order and picks");
+
+      // Shrinking via count-click past primaryPort updates primaryPort to surviving slot 0 so B-exit still works.
+      u8 shrink[17] = {1, 20, 2, 2, 1};
+      Require(ordered.ChangeCount(shrink) && ordered.state.count == 1 && ordered.state.ports[0] == 0,
+              "Resize(1) failed on sorted group");
+      raw.fill(0);
+      poll();
+      raw[0] = 2;
+      for (unsigned i = 0; i < 30; ++i)
+        Require(!poll()[35], "surviving P1 exited before 31 frames");
+      const auto p1Exit = poll();
+      Require(p1Exit[35] == 0x40 && p1Exit[34] == 0, "surviving P1 lost B-exit after shrinking past entering port");
+
+      // 2) Waiting-card claims: in-order claims in-place; out-of-order triggers same-count sorted reload.
+      LocalTeamsCoordinator waiting(0, nullptr, [] { return u16(0x8); });
+      frame = 10;
+      auto pollWait = [&]() {
+        for (unsigned i = 0; i < 4; ++i)
+        {
+          sampled[2 * i] = raw[12 * i];
+          sampled[2 * i + 1] = raw[12 * i + 1];
+        }
+        return waiting.Poll(SlippiMatchmaking::TEAMS, sampled.data(), raw.data(), 0, frame++);
+      };
+      waiting.Poll(u8(SlippiMatchmaking::TEAMS | 0x20), sampled.data(), raw.data(), 0, frame++);
+      u8 openThree[17] = {3, 2, 1, 0, 1};
+      Require(waiting.ChangeCount(openThree) && waiting.state.count == 3 && waiting.state.JoinedMask() == 1 &&
+                  waiting.state.ports == std::array<unsigned, 4>{{0, 4, 4, 4}},
+              "opening 3 cards failed");
+      // Arm all unjoined pads at neutral, then let P3 claim in-order (0 < 2 -> in-place, no reload).
+      raw.fill(0);
+      pollWait();
+      raw[12 * 2] = 0x01; // D-pad left
+      pollWait();
+      const auto afterP3 = pollWait();
+      Require(afterP3[35] == 0 && waiting.state.ports == std::array<unsigned, 4>{{0, 2, 4, 4}} &&
+                  waiting.state.JoinedMask() == 3,
+              "in-order waiting card claim unexpectedly triggered reload or wrong slot");
+      // Now P2 (port 1 < port 2) moves stick to claim the 3rd card -> must request sorted same-count reload.
+      raw.fill(0);
+      pollWait();
+      raw[12 * 1 + 2] = 80;
+      const auto needSort = pollWait();
+      Require(needSort[35] == (0x80 | 1) && needSort[34] == 3,
+              "out-of-order waiting card claim did not request same-count sorted reload");
+      u8 resort[17] = {3, 2, 1, 0, 1, 20, 2, 1, 1};
+      Require(waiting.ChangeCount(resort) && waiting.state.count == 3 && waiting.state.JoinedMask() == 7 &&
+                  waiting.state.ports == std::array<unsigned, 4>{{0, 1, 2, 4}} &&
+                  waiting.state.saved == 5 && waiting.state.selections[0].character == 2 &&
+                  waiting.state.selections[2].character == 20 && waiting.state.selections[1].character == 0,
+              "same-count ChangeCount failed to sort claimed P2 between P1 and P3 cleanly");
+
+      // Also verify out-of-order waiting claim when count=4 has unclaimed slots remaining ({3,4,4,4} + P2 -> {1,3,4,4}).
+      LocalTeamsCoordinator partialWait(0, nullptr, [] { return u16(0x8); });
+      frame = 10;
+      partialWait.Poll(u8(SlippiMatchmaking::TEAMS | 0x20), sampled.data(), raw.data(), 3, frame++);
+      u8 openFour[17] = {4, 9, 0, 0, 1};
+      Require(partialWait.ChangeCount(openFour), "opening 4 waiting cards failed");
+      raw.fill(0);
+      partialWait.Poll(SlippiMatchmaking::TEAMS, sampled.data(), raw.data(), 3, frame++);
+      raw[12 * 1 + 2] = 80;
+      const auto p2Sort = partialWait.Poll(SlippiMatchmaking::TEAMS, sampled.data(), raw.data(), 3, frame++);
+      Require(p2Sort[35] == (0x80 | 1) && p2Sort[34] == 4,
+              "partial 4-card waiting claim by P2 ahead of P4 did not request same-count reload");
+      u8 partialResort[17] = {4, 9, 0, 0, 1};
+      Require(partialWait.ChangeCount(partialResort) && partialWait.state.count == 4 &&
+                  partialWait.state.JoinedMask() == 3 &&
+                  partialWait.state.ports == std::array<unsigned, 4>{{1, 3, 4, 4}} &&
+                  partialWait.state.saved == 2 && partialWait.state.selections[1].character == 9,
+              "partial 4-card out-of-order claim corrupted waiting slots or shifted pick");
+    }
+    report << "PASS: added and claimed players stay strictly ordered by physical port while preserving picks and main-controller exit\n";
     for(unsigned count : {1u,2u,3u,4u}) for(bool connected : {false,true})
     {
       File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount="+std::to_string(count)+"\nBasePort=49120\n",File::GetUserPath(D_CONFIG_IDX)+"local-teams.ini");
@@ -916,8 +1043,127 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
               ("external-user-json.txt discovery failed: " + identityErr).c_str());
       Require(resolved[0].uid == "uid-main" && resolved[1].uid == "uid-partner",
               "external-user-json.txt did not discover from external user.json directory");
+
+      // 9. DisplayNames returns configured, autodiscovered, fallback, and 15-char game-encoded names cleanly.
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nIdentity1=" + ext1Path + "\n", iniPath);
+      LocalTeamsCoordinator displayCoord(0, nullptr, [] { return u16(0x8); });
+      displayCoord.state.count = 4;
+      const auto resolvedNames = displayCoord.DisplayNames(testDir);
+      Require(resolvedNames == std::array<std::string, 4>{{"Ext1", "Alpha", "Bravo", "Charlie"}},
+              "DisplayNames did not combine explicit override with autodiscovery");
+      Require(displayCoord.state.phase == LocalTeams::Phase::Selecting && displayCoord.Error().empty(),
+              "DisplayNames mutated coordinator error or phase");
+
+      File::Delete(iniPath);
+      LocalTeamsCoordinator partialDisplay(0, nullptr, [] { return u16(0x8); });
+      partialDisplay.state.count = 2;
+      const auto partialNames = partialDisplay.DisplayNames(fewDir);
+      Require(partialNames == std::array<std::string, 4>{{"Only", "", "", ""}} &&
+                  partialDisplay.state.phase == LocalTeams::Phase::Selecting && partialDisplay.Error().empty(),
+              "DisplayNames failed or mutated state when primary user was absent");
+
+      const std::string encodedMax = ConvertStringForGame("ABCDEFGHIJKLMNOXYZ", 15);
+      Require(encodedMax.size() == LocalTeams::NameSlotSize &&
+                  std::string(encodedMax.c_str()) == "ABCDEFGHIJKLMNO" &&
+                  encodedMax[LocalTeams::NameSlotSize - 1] == '\0',
+              "ConvertStringForGame did not produce a 31-byte buffer truncated to 15 chars");
     }
     report << "PASS: local teams identity autodiscovery respects explicit overrides and falls back cleanly on invalid/missing files\n";
+
+    // Three-player (%3 FFA) lobby validation, readiness, frame exchange, and remote disconnect.
+    {
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=2\nNativeCSS=True\nLoopbackTest=False\nBasePort=49120\n",
+                              File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini");
+      LocalTeamsCoordinator coord(0, nullptr, [] { return u16(0x8); });
+      coord.SetSearchCode("TEST\x81\x93\x82\x52");
+      Require(coord.SearchCode() == "TEST\x81\x93\x82\x52", "SearchCode corrupted full-width Shift-JIS %3");
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=2\nNativeCSS=True\nLoopbackTest=False\nLobbyCode=ROOM#1%3\nBasePort=49120\n",
+                              File::GetUserPath(D_CONFIG_IDX) + "local-teams.ini");
+      LocalTeamsCoordinator asciiCode(0, nullptr, [] { return u16(0x8); });
+      Require(asciiCode.SearchCode() == std::string("ROOM\x81\x94") + "1\x81\x93" + "3",
+              "SearchCode did not convert ASCII #/% to full-width Shift-JIS");
+
+      const u8 buttons[8] = {};
+      coord.Poll(SlippiMatchmaking::TEAMS, buttons);
+      for (u8 i = 0; i < 2; ++i)
+      {
+        const u8 sel[9] = {u8(i), u8(i + 1), 2, 1, 0, 0x1F, 1, u8(0x80 | i), 0};
+        Require(coord.Confirm(sel, 700 + i), "3-player local confirm failed");
+      }
+      auto mmPrimary = std::make_unique<SlippiMatchmaking>(0, nullptr);
+      mmPrimary->SetupLocalTeamsLoopback(0, basePort, 3);
+      coord.guests[0].matchmaking = std::make_unique<SlippiMatchmaking>(0, nullptr);
+      coord.guests[0].matchmaking->SetupLocalTeamsLoopback(2, basePort, 3);
+      auto mmRemote = std::make_unique<SlippiMatchmaking>(0, nullptr);
+      mmRemote->SetupLocalTeamsLoopback(1, basePort, 3);
+
+      Await([&] {
+        return mmRemote->GetMatchmakeState() == SlippiMatchmaking::CONNECTION_SUCCESS &&
+               coord.Tick(*mmPrimary, nullptr) == SlippiMatchmaking::CONNECTION_SUCCESS;
+      }, "3-player (%3) ENet lobby did not connect");
+      Require(coord.lobbySize == 3 && coord.Error().empty(),
+              ("3-player (%3) lobby failed validation: " + coord.Error()).c_str());
+
+      auto netPrimary = mmPrimary->GetNetplayClient();
+      auto netRemote = mmRemote->GetNetplayClient();
+      Require(SLIPPI_NETPLAY_CLIENT_COUNT.load() == 3, "unexpected netplay client count in 3-player lobby");
+      Require(coord.Tick(*mmPrimary, netPrimary.get()) == SlippiMatchmaking::CONNECTION_SUCCESS &&
+                  !coord.LobbyDisconnected() && coord.Error().empty(),
+              "3-player lobby closed prematurely while checking missing slot 4");
+
+      coord.PublishSelections(*netPrimary);
+      Require(!coord.AllReady(*netPrimary), "3-player lobby reported ready before remote peer picked");
+      SlippiPlayerSelections remoteSel;
+      remoteSel.characterId = 20; remoteSel.characterColor = 0; remoteSel.teamId = 1;
+      remoteSel.rngOffset = 777; remoteSel.stageId = 0x1F;
+      remoteSel.isCharacterSelected = remoteSel.isStageSelected = true;
+      netRemote->SetMatchSelections(remoteSel);
+      Await([&] { return coord.AllReady(*netPrimary); }, "3-player lobby never became ready with 2 remote peers");
+
+      netPrimary->StartSlippiGame(); coord.StartGame(); netRemote->StartSlippiGame();
+      for (s32 frame = 1; frame <= 10; ++frame)
+      {
+        u8 raw[48] = {};
+        raw[1] = 0x01; raw[2] = u8(40 + frame);
+        raw[13] = 0x02; raw[14] = u8(50 + frame);
+        u8 remPad[12] = {0, 0x04, u8(60 + frame)};
+        if (frame == 1)
+          for (s32 initial = 1; initial <= 2; ++initial)
+          {
+            netPrimary->SendSlippiPad(std::make_unique<SlippiPad>(initial));
+            netRemote->SendSlippiPad(std::make_unique<SlippiPad>(initial));
+          }
+        netPrimary->SendSlippiPad(std::make_unique<SlippiPad>(frame + 2, frame - 1, 0x33000000u + frame, raw));
+        coord.SendInputs(frame, 2, frame - 1, 0x33000000u + frame, raw, false);
+        netRemote->SendSlippiPad(std::make_unique<SlippiPad>(frame + 2, frame - 1, 0x33000000u + frame, remPad));
+        unsigned polls = 0;
+        Await([&] {
+          bool ok = true;
+          for (unsigned peer = 0; peer < 2; ++peer)
+            ok &= netPrimary->GetSlippiRemotePad(peer, 7)->latestFrame >= frame + 2 &&
+                  netRemote->GetSlippiRemotePad(peer, 7)->latestFrame >= frame + 2;
+          if (!ok && ++polls % 8 == 0)
+          {
+            netPrimary->SendSlippiPad(nullptr);
+            coord.SendInputs(frame, 2, frame - 1, 0x33000000u + frame, raw, true);
+            netRemote->SendSlippiPad(nullptr);
+          }
+          return ok;
+        }, "3-player frames did not deliver to all 3 peers");
+        netPrimary->DropOldRemoteInputs(frame - 1);
+        netRemote->DropOldRemoteInputs(frame - 1);
+      }
+
+      coord.Poll(SlippiMatchmaking::TEAMS, buttons);
+      netRemote.reset(); mmRemote.reset();
+      Await([&] { return coord.Tick(*mmPrimary, netPrimary.get()) == SlippiMatchmaking::IDLE; },
+            "3-player lobby did not close on remote departure");
+      Require(coord.LobbyDisconnected() && coord.Error().empty(),
+              "3-player remote departure faulted a local peer");
+      coord.Cleanup(); netPrimary.reset(); mmPrimary.reset();
+      Require(!IsOnline(), "3-player (%3) fixture leaked a network client");
+      report << "PASS: three-player (%3) lobby validates, readies, runs frames, and closes cleanly on remote departure\n";
+    }
   }
   catch (const std::exception& error) { report << "FAIL: " << error.what() << '\n'; result = 1; }
   enet_deinitialize();

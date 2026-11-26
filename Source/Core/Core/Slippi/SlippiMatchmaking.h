@@ -91,8 +91,8 @@ class SlippiMatchmaking
 
 	void FindMatch(MatchSearchSettings settings);
   void RequestStop(); // Signal every local worker before joining any of them.
-  // Four-client localhost fixture: normal ENet protocol, no matchmaking service.
-  void SetupLocalTeamsLoopback(u8 slot, u16 basePort);
+  // Multi-client localhost fixture: normal ENet protocol, no matchmaking service.
+  void SetupLocalTeamsLoopback(u8 slot, u16 basePort, u8 playerCount = 4);
 	void MatchmakeThread();
 	ProcessState GetMatchmakeState();
 	bool IsSearching();

@@ -1025,16 +1025,79 @@ void SlippiNetplayClient::ThreadFunc()
 
 				disablePacketThrottleDrops(netEvent.peer);
 
+				auto isAlreadyConnected = false;
+				int matchedRemoteIdx = -1;
+				for (int i = 0; i < (int)m_server.size(); i++)
+				{
+					if (connections[i] && netEvent.peer->address.host == m_server[i]->address.host &&
+					    netEvent.peer->address.port == m_server[i]->address.port)
+					{
+						m_server[i] = netEvent.peer;
+						isAlreadyConnected = true;
+						matchedRemoteIdx = i;
+						break;
+					}
+				}
+
+				if (!isAlreadyConnected)
+				{
+					// Prefer an exact host+port match first so peers sharing an IP (localhost/LAN)
+					// do not claim another peer's slot when connections complete out of order.
+					for (int i = 0; i < (int)m_server.size(); i++)
+					{
+						if (remoteAddrs[i].host == netEvent.peer->address.host &&
+						    remoteAddrs[i].port == netEvent.peer->address.port && !connections[i])
+						{
+							m_server[i] = netEvent.peer;
+							connections[i] = true;
+							matchedRemoteIdx = i;
+							break;
+						}
+					}
+				}
+
+				if (!isAlreadyConnected && matchedRemoteIdx < 0)
+				{
+					for (int i = 0; i < (int)m_server.size(); i++)
+					{
+						// This check used to check for port as well as host. The problem was that for some people, their
+						// internet will switch the port they're sending from. This means these people struggle to connect
+						// to others but they sometimes do succeed. When we were checking for port here though we would get
+						// into a state where the person they succeeded to connect to would not accept the connection with
+						// them, this would lead the player with this internet issue to get stuck waiting for the other
+						// player. The only downside to this that I can guess is that if you fail to connect to one person
+						// out of two that are on your LAN, it might report that you failed to connect to the wrong person.
+						// There might be more problems tho, not sure
+						INFO_LOG(SLIPPI_ONLINE, "[Netplay] Comparing connection address: %x - %x", remoteAddrs[i].host,
+						         netEvent.peer->address.host);
+						if (remoteAddrs[i].host == netEvent.peer->address.host && !connections[i])
+						{
+							INFO_LOG(SLIPPI_ONLINE, "[Netplay] Overwriting ENetPeer for address: %x:%d",
+							         netEvent.peer->address.host, netEvent.peer->address.port);
+							INFO_LOG(SLIPPI_ONLINE, "[Netplay] Overwriting ENetPeer with id (%d) with new peer of id %d",
+							         m_server[i]->connectID, netEvent.peer->connectID);
+							m_server[i] = netEvent.peer;
+							connections[i] = true;
+							matchedRemoteIdx = i;
+							break;
+						}
+					}
+				}
+
 				std::stringstream keyStrm;
 				keyStrm << netEvent.peer->address.host << "-" << netEvent.peer->address.port;
-				int earlyConnRemoteIdx = 0;
-				for (int i = 0; i < (int)remoteAddrs.size(); i++)
+				int earlyConnRemoteIdx = matchedRemoteIdx;
+				if (earlyConnRemoteIdx < 0)
 				{
-					if (remoteAddrs[i].host == netEvent.peer->address.host &&
-					    remoteAddrs[i].port == netEvent.peer->address.port)
+					earlyConnRemoteIdx = 0;
+					for (int i = 0; i < (int)remoteAddrs.size(); i++)
 					{
-						earlyConnRemoteIdx = i;
-						break;
+						if (remoteAddrs[i].host == netEvent.peer->address.host &&
+						    remoteAddrs[i].port == netEvent.peer->address.port)
+						{
+							earlyConnRemoteIdx = i;
+							break;
+						}
 					}
 				}
 				ActiveConnectionInfo earlyConnInfo;
@@ -1045,18 +1108,6 @@ void SlippiNetplayClient::ThreadFunc()
 				// INFO_LOG(SLIPPI_ONLINE, "[Netplay] got connect event with peer addr %x:%d. %x",
 				//         netEvent.peer->address.host, netEvent.peer->address.port, netEvent.peer);
 
-				auto isAlreadyConnected = false;
-				for (int i = 0; i < m_server.size(); i++)
-				{
-					if (connections[i] && netEvent.peer->address.host == m_server[i]->address.host &&
-					    netEvent.peer->address.port == m_server[i]->address.port)
-					{
-						m_server[i] = netEvent.peer;
-						isAlreadyConnected = true;
-						break;
-					}
-				}
-
 				if (isAlreadyConnected)
 				{
 					// Don't add this person again if they are already connected. Not doing this can cause one person to
@@ -1064,30 +1115,6 @@ void SlippiNetplayClient::ThreadFunc()
 					// the "Waiting" step
 					INFO_LOG(SLIPPI_ONLINE, "Already connected!");
 					break; // Breaks out of case
-				}
-
-				for (int i = 0; i < m_server.size(); i++)
-				{
-					// This check used to check for port as well as host. The problem was that for some people, their
-					// internet will switch the port they're sending from. This means these people struggle to connect
-					// to others but they sometimes do succeed. When we were checking for port here though we would get
-					// into a state where the person they succeeded to connect to would not accept the connection with
-					// them, this would lead the player with this internet issue to get stuck waiting for the other
-					// player. The only downside to this that I can guess is that if you fail to connect to one person
-					// out of two that are on your LAN, it might report that you failed to connect to the wrong person.
-					// There might be more problems tho, not sure
-					INFO_LOG(SLIPPI_ONLINE, "[Netplay] Comparing connection address: %x - %x", remoteAddrs[i].host,
-					         netEvent.peer->address.host);
-					if (remoteAddrs[i].host == netEvent.peer->address.host && !connections[i])
-					{
-						INFO_LOG(SLIPPI_ONLINE, "[Netplay] Overwriting ENetPeer for address: %x:%d",
-						         netEvent.peer->address.host, netEvent.peer->address.port);
-						INFO_LOG(SLIPPI_ONLINE, "[Netplay] Overwriting ENetPeer with id (%d) with new peer of id %d",
-						         m_server[i]->connectID, netEvent.peer->connectID);
-						m_server[i] = netEvent.peer;
-						connections[i] = true;
-						break;
-					}
 				}
 				break;
 			}
@@ -1325,18 +1352,35 @@ void SlippiNetplayClient::ThreadFunc()
 
 				std::stringstream keyStrm;
 				keyStrm << netEvent.peer->address.host << "-" << netEvent.peer->address.port;
-				int lateConnRemoteIdx = 0;
-				for (int i = 0; i < (int)m_server.size(); i++)
+				int lateConnRemoteIdx = -1;
+				for (int i = 0; i < (int)remoteAddrs.size(); i++)
 				{
-					if (m_server[i]->address.host == netEvent.peer->address.host &&
-					    m_server[i]->address.port == netEvent.peer->address.port)
+					if (remoteAddrs[i].host == netEvent.peer->address.host &&
+					    remoteAddrs[i].port == netEvent.peer->address.port)
 					{
 						lateConnRemoteIdx = i;
 						break;
 					}
 				}
+				if (lateConnRemoteIdx < 0)
+				{
+					for (int i = 0; i < (int)m_server.size(); i++)
+					{
+						if (m_server[i]->address.host == netEvent.peer->address.host &&
+						    m_server[i]->address.port == netEvent.peer->address.port)
+						{
+							lateConnRemoteIdx = i;
+							break;
+						}
+					}
+				}
 				ActiveConnectionInfo lateConnInfo;
-				lateConnInfo.playerIdx = matchInfo.remotePlayerSelections[lateConnRemoteIdx].playerIdx;
+				if (lateConnRemoteIdx >= 0)
+					lateConnInfo.playerIdx = matchInfo.remotePlayerSelections[lateConnRemoteIdx].playerIdx;
+				else if (!activeConnections[keyStrm.str()].empty())
+					lateConnInfo.playerIdx = activeConnections[keyStrm.str()].begin()->second.playerIdx;
+				else
+					lateConnInfo.playerIdx = matchInfo.remotePlayerSelections[0].playerIdx;
 				// A dropped player stays dropped, the other players have already moved on without them
 				if (m_playerDropTimesMs[lateConnInfo.playerIdx] != 0)
 				{

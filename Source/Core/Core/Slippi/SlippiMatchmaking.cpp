@@ -931,8 +931,12 @@ SlippiUser::UserInfo SlippiMatchmaking::GetIdentity()
   return m_identity ? *m_identity : m_user->GetUserInfo();
 }
 
-void SlippiMatchmaking::SetupLocalTeamsLoopback(u8 slot, u16 basePort)
+void SlippiMatchmaking::SetupLocalTeamsLoopback(u8 slot, u16 basePort, u8 playerCount)
 {
+  if (playerCount < 2)
+    playerCount = 2;
+  if (playerCount > 4)
+    playerCount = 4;
   m_localTeamsLoopback = true;
   m_searchSettings.mode = OnlinePlayMode::TEAMS;
   m_localPlayerIndex = slot;
@@ -942,9 +946,10 @@ void SlippiMatchmaking::SetupLocalTeamsLoopback(u8 slot, u16 basePort)
   m_mmResult.items = 0;
   m_mmResult.stages = {0x1F};
   m_allowedStages = m_mmResult.stages;
+  m_playerInfo.clear();
   std::vector<std::string> addresses;
   std::vector<u16> ports;
-  for (u8 i = 0; i < 4; ++i)
+  for (u8 i = 0; i < playerCount; ++i)
   {
     SlippiUser::UserInfo player;
     player.uid = "local-test-" + std::to_string(i + 1);
@@ -955,6 +960,6 @@ void SlippiMatchmaking::SetupLocalTeamsLoopback(u8 slot, u16 basePort)
     if (i != slot) { addresses.push_back("127.0.0.1"); ports.push_back(basePort + i); }
   }
   m_mmResult.players = m_playerInfo;
-  m_netplayClient = std::make_unique<SlippiNetplayClient>(addresses, ports, 3, m_hostPort, m_isHost, slot);
+  m_netplayClient = std::make_unique<SlippiNetplayClient>(addresses, ports, u8(playerCount - 1), m_hostPort, m_isHost, slot);
   m_state = ProcessState::OPPONENT_CONNECTING;
 }

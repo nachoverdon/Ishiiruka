@@ -97,6 +97,7 @@ class CEXISlippi : public IEXIDevice
     CMD_LOCAL_TEAMS_CONFIRM = LocalTeams::ConfirmCommand,
     CMD_LOCAL_TEAMS_INPUTS = LocalTeams::InputsCommand,
     CMD_LOCAL_TEAMS_COUNT = LocalTeams::CountCommand,
+    CMD_LOCAL_TEAMS_NAMES = LocalTeams::NamesCommand,
 
 		// Misc
 		CMD_LOG_MESSAGE = 0xD0,
@@ -169,6 +170,7 @@ class CEXISlippi : public IEXIDevice
 	    {CMD_LOCAL_TEAMS_CONFIRM, LocalTeams::ConfirmPayloadSize},
 	    {CMD_LOCAL_TEAMS_INPUTS, LocalTeams::InputsPayloadSize},
 	    {CMD_LOCAL_TEAMS_COUNT, LocalTeams::CountPayloadSize},
+	    {CMD_LOCAL_TEAMS_NAMES, LocalTeams::NamesPayloadSize},
 	    {CMD_CAPTURE_SAVESTATE, 32},
 	    {CMD_LOAD_SAVESTATE, 32},
 	    {CMD_GET_MATCH_STATE, 0},
@@ -252,6 +254,7 @@ class CEXISlippi : public IEXIDevice
 	void pollLocalTeams(u8* payload);
 	void changeLocalTeamsCount(u8* payload);
 	void confirmLocalTeams(u8* payload);
+	void prepareLocalTeamsNames();
 	bool prepareOpponentInputs(s32 frame, bool shouldSkip);
 	void handleSendInputs(s32 frame, u8 delay, s32 checksumFrame, u32 checksum, u8 *inputs);
 	void startInputSuggestions(u8 delay, u8 inputSourcePort);

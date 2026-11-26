@@ -3551,7 +3551,7 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
 		}
 
 		u32 payloadLen = payloadSizes[byte];
-    if (byte >= CMD_LOCAL_TEAMS_POLL && byte <= CMD_LOCAL_TEAMS_COUNT && payloadLen + 1 > _uSize - bufLoc)
+    if (byte >= CMD_LOCAL_TEAMS_POLL && byte <= CMD_LOCAL_TEAMS_NAMES && payloadLen + 1 > _uSize - bufLoc)
     {
       ERROR_LOG(SLIPPI, "Truncated local teams command: 0x%X", byte);
       m_read_queue.clear();
@@ -3608,6 +3608,9 @@ void CEXISlippi::DMAWrite(u32 _uAddr, u32 _uSize)
       break;
     case CMD_LOCAL_TEAMS_COUNT:
       changeLocalTeamsCount(&memPtr[bufLoc + 1]);
+      break;
+    case CMD_LOCAL_TEAMS_NAMES:
+      prepareLocalTeamsNames();
       break;
     case CMD_ONLINE_INPUTS:
 			handleOnlineInputs(&memPtr[bufLoc + 1]);
@@ -3850,4 +3853,15 @@ void CEXISlippi::changeLocalTeamsCount(u8* payload)
   const u8 buttons[8] = {};
   const auto status = localTeams->Poll(SlippiMatchmaking::TEAMS | 0x80, buttons);
   m_read_queue.assign(status.begin(), status.end());
+}
+
+void CEXISlippi::prepareLocalTeamsNames()
+{
+  m_read_queue.clear();
+  const auto names = localTeams->DisplayNames();
+  for (unsigned i = 0; i < 4; ++i)
+  {
+    std::string encoded = ConvertStringForGame(names[i], MAX_NAME_LENGTH);
+    m_read_queue.insert(m_read_queue.end(), encoded.begin(), encoded.end());
+  }
 }

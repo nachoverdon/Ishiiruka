@@ -34,6 +34,7 @@ public:
   bool NativeCSS() const { return nativeCSS && !loopback; }
   void RefreshStage();
   SlippiPlayerSelections PrimarySelection() const;
+  std::array<std::string, 4> DisplayNames(const std::string& discoveryDir = std::string());
 private:
   friend int RunLocalTeamsSelfTest(const std::string& reportPath);
   struct Session
@@ -49,6 +50,7 @@ private:
   SlippiUser* user;
   bool enabled = true, active = false, validated = false, published = false;
   bool lobbyDisconnected = false;
+  unsigned lobbySize = 0;
   std::array<unsigned, 4> localSlots{{4, 4, 4, 4}};
   unsigned basePort = 49000;
   bool loopback = false;

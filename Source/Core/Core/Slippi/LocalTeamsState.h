@@ -10,10 +10,14 @@ constexpr std::uint8_t PollCommand = 0xC5;
 constexpr std::uint8_t ConfirmCommand = 0xC6;
 constexpr std::uint8_t InputsCommand = 0xC7;
 constexpr std::uint8_t CountCommand = 0xC8;
+constexpr std::uint8_t NamesCommand = 0xC9;
 constexpr unsigned PollPayloadSize = 62; // mode, buttons, entering port, four PAD reports, CSS frame
 constexpr unsigned ConfirmPayloadSize = 9;
 constexpr unsigned InputsPayloadSize = 75; // stock 27 + four raw PAD reports
 constexpr unsigned CountPayloadSize = 17; // requested count + four character/costume/team/placed tuples
+constexpr unsigned NamesPayloadSize = 0;
+constexpr unsigned NameSlotSize = 31; // MAX_NAME_LENGTH * 2 + 1 (Shift-JIS + NUL)
+constexpr unsigned NamesResponseSize = 4 * NameSlotSize; // 124 bytes
 constexpr unsigned StatusSize = 36; // saved picks plus joined/suppressed local masks
 constexpr unsigned RosterHoldFrames = 31; // match the native CSS B hold
 
@@ -29,6 +33,7 @@ class State
 {
 public:
   unsigned count = 2;
+  unsigned primaryPort = 0;
   std::array<unsigned, 4> ports{{0, 1, 2, 3}};
   std::array<Selection, 4> selections{};
   Phase phase = Phase::Selecting;
@@ -61,6 +66,7 @@ public:
   void BeginJoining(unsigned primary)
   {
     if (primary > 3) return;
+    primaryPort = primary;
     joining = true; joined = 1; joinArmed = 0; suppressed = 1u << primary;
     joinPreviousButtons.fill(0); lastJoinFrame = UINT32_MAX;
     joinStartHold.fill(0); leaveHold.fill(0); rosterAction = 0;
@@ -100,9 +106,10 @@ public:
       if (report[10] == 0 && !report[0] && !report[1]) suppressed &= ~bit;
       unsigned owner = 4;
       for (unsigned i = 0; i < count; ++i) if (Claimed(i) && ports[i] == port) owner = i;
+      const bool isMain = owner < 4 && (count == 1 || port == primaryPort);
       // The main controller can leave CSS while searching or in a lobby,
       // just as in stock Slippi. This does not change a live lobby's roster.
-      if (owner == 0 && phase != Phase::InGame && report[10] == 0)
+      if (isMain && phase != Phase::InGame && report[10] == 0)
       {
         joinStartHold[port] = 0;
         leaveHold[port] = InputEnabled(owner) && (buttons & 0x200) ? leaveHold[port] + 1 : 0;
@@ -117,7 +124,7 @@ public:
         joinStartHold[port] = 0;
         leaveHold[port] = InputEnabled(owner) && (buttons & 0x200) ? leaveHold[port] + 1 : 0;
         if (leaveHold[port] >= RosterHoldFrames && !rosterAction)
-        { rosterAction = 0x40 | owner; rosterCount = owner == 0 ? 0 : count - 1; }
+        { rosterAction = 0x40 | owner; rosterCount = count - 1; }
         continue;
       }
       leaveHold[port] = 0;
@@ -135,6 +142,16 @@ public:
       for (unsigned i = 1; i < count; ++i)
         if (!Claimed(i))
         {
+          bool needsSort = false;
+          for (unsigned j = 0; j < i; ++j)
+            if (Claimed(j) && ports[j] > port) needsSort = true;
+          if (needsSort)
+          {
+            rosterAction = 0x80 | port;
+            rosterCount = count;
+            joinStartHold[port] = 0;
+            break;
+          }
           ports[i] = port; joined |= 1u << i; suppressed |= bit; joinArmed &= ~bit;
           saved &= ~(1u << i); selections[i] = {};
           nativeArmed &= ~(1u << i);
@@ -149,7 +166,29 @@ public:
   }
   void ClaimAddedPort(unsigned port)
   {
-    ports[count-1] = port; joined |= 1u << (count-1); suppressed |= 1u << port;
+    if (port > 3 || count == 0 || count > 4) return;
+    for (unsigned i = 0; i < count; ++i)
+      if (Claimed(i) && ports[i] == port) return;
+    unsigned freeSlot = count;
+    for (unsigned i = 0; i < count; ++i)
+      if (!Claimed(i)) { freeSlot = i; break; }
+    if (freeSlot >= count) return;
+    unsigned insert = 0;
+    while (insert < freeSlot && ports[insert] < port) ++insert;
+    for (unsigned i = freeSlot; i > insert; --i)
+    {
+      ports[i] = ports[i - 1];
+      selections[i] = selections[i - 1];
+    }
+    const unsigned low = (1u << insert) - 1;
+    const unsigned shiftMask = ((1u << freeSlot) - 1) & ~low;
+    const unsigned keepHigh = ~((1u << (freeSlot + 1)) - 1);
+    saved = (saved & keepHigh) | (saved & low) | ((saved & shiftMask) << 1);
+    joined = (joined & keepHigh) | (joined & low) | ((joined & shiftMask) << 1) | (1u << insert);
+    ports[insert] = port;
+    selections[insert] = {};
+    suppressed |= 1u << port;
+    joinArmed &= ~(1u << port);
   }
   void RemovePlayer(unsigned player)
   {
@@ -178,6 +217,10 @@ public:
       joined &= (1u << count) - 1; saved &= joined; joinArmed = 0;
       joinPreviousButtons.fill(0); lastJoinFrame = UINT32_MAX;
       for (unsigned i = count; i < 4; ++i) { ports[i] = 4; selections[i] = {}; }
+      bool hasPrimary = false;
+      for (unsigned i = 0; i < count; ++i)
+        if (Claimed(i) && ports[i] == primaryPort) hasPrimary = true;
+      if (!hasPrimary && Claimed(0)) primaryPort = ports[0];
     }
     if (!Valid()) { count = previous; return false; }
     ResetSelection();

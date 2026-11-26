@@ -439,6 +439,31 @@ void Run(const std::string& directory, std::ofstream& report)
               "native cursor-path override changed CSS pointer or stock single-player behavior");
       Require(Memory::Read_U8(Runner::SceneData + 2) == 14, "native cursor override replaced the online scene type");
     }
+    {
+      Runner countSheik(nativeCount); countSheik.Status(4, 0);
+      Memory::Write_U8(1, Runner::Css + nativeCount.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+      Memory::Write_U8(14, Runner::SceneData + 2);
+      const std::array<u8, 4> initialChars{{0x13, 0x12, 0x02, 0x13}};
+      for (unsigned slot = 0; slot < 4; ++slot)
+        Memory::Write_U8(initialChars[slot], Runner::SceneData + 0x70 + 36 * slot);
+      Memory::Write_U8(0x13, 0x803F0CC8u + 1u);
+      auto& cpu = PowerPC::ppcState;
+      cpu.gpr[3] = Runner::SceneData;
+      cpu.gpr[4] = 0x11111111u; cpu.gpr[5] = 0x22222222u; cpu.gpr[6] = 0x33333333u;
+      cpu.gpr[7] = 0x44444444u; cpu.gpr[8] = 0x55555555u;
+      countSheik.Run(Elf::Base, {Elf::Base + u32(nativeCount.text.size())});
+      Require(cpu.gpr[0] == 0u && cpu.gpr[3] == Runner::SceneData + 2 &&
+                  cpu.gpr[4] == 0x11111111u && cpu.gpr[5] == 0x22222222u &&
+                  cpu.gpr[6] == 0x33333333u && cpu.gpr[7] == 0x44444444u &&
+                  cpu.gpr[8] == 0x55555555u,
+              "nativeCount Sheik pre-pass corrupted GPRs");
+      Require(Memory::Read_U8(Runner::Css + nativeCount.Symbol("CSSDT_NATIVE_SHEIK_MASK")) == 0x09u &&
+                  Memory::Read_U8(0x803F0CC8u + 1u) == 0x12u,
+              "nativeCount did not stash Sheik mask or temporarily map icon to Zelda");
+      for (unsigned slot = 0; slot < 4; ++slot)
+        Require(Memory::Read_U8(Runner::SceneData + 0x70 + 36 * slot) == (slot == 2 ? 0x02u : 0x12u),
+                "nativeCount did not temporarily rewrite Sheik slots to Zelda for puck init");
+    }
     for(unsigned count : {1u,2u,3u,4u}) for (unsigned player=0;player<count;++player)
     {
       const unsigned characters[]={2,20,13,0};
@@ -540,7 +565,13 @@ void Run(const std::string& directory, std::ofstream& report)
       Require(pads.packets.size()==1 && pads.packets[0].size()==LocalTeams::PollPayloadSize+1 && pads.packets[0][6]==0x10 && pads.packets[0][7]==0x10,
               "native CSS lost raw Start before coordinator polling");
       Require(input.Symbol("CSSDT_CONNECTED_PADS")==0xB1 && input.Symbol("CSSDT_LOCAL_TEAMS_EXI_BUF")==0xC0 &&
-              input.Symbol("CSSDT_SIZE")==0x140 && input.Symbol("CSS_SAVED_CURSORS_ADDR")==0x80005620,
+              input.Symbol("CSSDT_LOCAL_TEAMS_NAMES")==0x140 && input.Symbol("CSSDT_CARD_PORT_TEXTS")==0x1BC &&
+              input.Symbol("CSSDT_CARD_NAME_TEXTS")==0x1CC && input.Symbol("CSSDT_NATIVE_ORIGINAL_Z")==0x1DC &&
+              input.Symbol("CSSDT_CARD_PORT_CACHE")==0x1EC &&
+              input.Symbol("CSSDT_NATIVE_ORIGINAL_Y")==0x1F0 && input.Symbol("CSSDT_NATIVE_ORIGINAL_SX")==0x220 &&
+              input.Symbol("CSSDT_NATIVE_ORIGINAL_SY")==0x250 && input.Symbol("CSSDT_NATIVE_PIVOT_DX")==0x280 &&
+              input.Symbol("CSSDT_NATIVE_PIVOT_DY")==0x2B0 &&
+              input.Symbol("CSSDT_SIZE")==0x2E0 && input.Symbol("CSS_SAVED_CURSORS_ADDR")==0x80005620,
               "CSSDT layout or static saved-cursor address shifted unexpectedly");
       Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x0F,
               "TriggerSendInput did not record all four connected pads before remapping");
@@ -771,9 +802,12 @@ void Run(const std::string& directory, std::ofstream& report)
                 "native CSS cursor visibility did not match claimed cards");
       for(unsigned player=0;player<count;++player)
         Require(Memory::Read_U8(0x81203000+player*0x100+7)==40,"first visible token can retain the wrong adapter-port label");
-      const float shift=count==1?0:count==2?-2.6f:count==3?6.4f:9.4f;
-      if(count>=2) Require(std::abs(readFloat(0x803F0DFC+36+0x1C)-(-11.4f-shift))<0.001f,
-                          "overlapping panel's team hitbox did not move with its marker");
+      const float expectedTeamLeft1 = count == 2 ? -8.8f : count == 3 ? -18.25f : -22.6408f;
+      if (count >= 2) Require(std::abs(readFloat(0x803F0DFC + 36 + 0x1C) - expectedTeamLeft1) < 0.01f,
+                              "scaled panel team hitbox did not move/scale with its card center");
+      for (unsigned player = 0; player + 1 < count; ++player)
+        Require(readFloat(0x803F0DFC + 36 * player + 0x20) < readFloat(0x803F0DFC + 36 * (player + 1) + 0x1C),
+                "adjacent scaled cards had overlapping team button hitboxes");
       Require(removedDObjs==std::vector<u32>({0x81300100,0x81302400}),"header replacement removed a panel instead of the old frame/title");
       for(unsigned joint : {1u,36u})
         Require(Memory::Read_U32(0x81100000+joint*0x100+0x18)==0x81400000+joint*0x100,
@@ -804,6 +838,253 @@ void Run(const std::string& directory, std::ofstream& report)
               !Memory::Read_U32(nativeInit.Symbol("CSS_SAVED_CURSORS_ADDR") + nativeInit.Symbol("SAVED_CURSORS_MASK")),
               "non-native CSS init did not clear CSSDT_LOADING or saved cursor mask");
     }
+    {
+      Runner initSheik(nativeInit); initSheik.Status(4, 0);
+      Memory::Write_U8(1, Runner::Css + nativeInit.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+      Memory::Write_U8(0x09, Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_SHEIK_MASK"));
+      Memory::Write_U8(0x12, 0x803F0CC8u + 1u);
+      const std::array<u8, 4> midInitChars{{0x12, 0x12, 0x02, 0x12}};
+      for (unsigned slot = 0; slot < 4; ++slot)
+        Memory::Write_U8(midInitChars[slot], Runner::SceneData + 0x70 + 36 * slot);
+      Memory::Write_U32(Runner::Buffer, Runner::R13 - 0x49C8);
+      Memory::Write_U32(0x81207000, Runner::Buffer + 0x60);
+      initSheik.services[0x80370E44] = [] { PowerPC::ppcState.gpr[3] = 0x81208000; };
+      for (unsigned joint : {1u, 36u})
+      {
+        Memory::Write_U32(0x81300000 + joint * 0x100, 0x81100000 + joint * 0x100 + 0x18);
+        Memory::Write_U32(0x81400000 + joint * 0x100, 0x81210000 + joint * 0x100 + 0x18);
+      }
+      Memory::Write_U32(0x81410000, 0x81400100 + 8);
+      Memory::Write_U32(0x81411000, 0x81410000 + 8);
+      Memory::Write_U32(0x81412000, 0x81411000 + 0x58);
+      Memory::Write_U32(0x81413000, 0x81412000);
+      Memory::Write_U32(0x00680048, 0x81412000 + 4);
+      Memory::Write_U32(0, 0x81412000 + 8);
+      initSheik.services[0x8035E24C] = [] {};
+      initSheik.services[0x80371590] = [] {};
+      for (unsigned i = 0; i < 4; ++i)
+      {
+        const u32 cursor = 0x81200000 + i * 0x100, token = 0x81203000 + i * 0x100;
+        Memory::Write_U32(cursor, 0x804A0BC0 + 4 * i); Memory::Write_U32(token, 0x804A0BD0 + 4 * i);
+        Memory::Write_U32(cursor + 0x40, cursor); Memory::Write_U32(token + 0x40, token);
+        Memory::Write_U32(cursor + 0x80, cursor + 0x40 + 0x28); Memory::Write_U32(token + 0x80, token + 0x40 + 0x28);
+      }
+      initSheik.services[nativeInit.Symbol("JObj_GetJObjChild")] = [] {
+        auto& cpu = PowerPC::ppcState;
+        Memory::Write_U32((cpu.gpr[3] == 0x81208000 ? 0x81210000 : 0x81100000) + cpu.gpr[5] * 0x100, cpu.gpr[4]);
+      };
+      initSheik.services[nativeInit.Symbol("HSD_PadFlushQueue")] = [] {};
+      initSheik.services[nativeInit.Symbol("JObj_SetFlagsAll")] = [] {};
+      std::vector<std::pair<u32, u8>> cspCalls;
+      initSheik.services[0x8025DB34u] = [&] {
+        cspCalls.emplace_back(PowerPC::ppcState.gpr[3], Memory::Read_U8(0x803F0CC8u + 1u));
+      };
+      initSheik.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+      Require(Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_SHEIK_MASK")) == 0u &&
+                  Memory::Read_U8(0x803F0CC8u + 1u) == 0x13u,
+              "nativeInit did not clear Sheik mask or restore Slippi default Sheik icon");
+      const std::array<u8, 4> restoredChars{{0x13, 0x12, 0x02, 0x13}};
+      for (unsigned slot = 0; slot < 4; ++slot)
+        Require(Memory::Read_U8(Runner::SceneData + 0x70 + 36 * slot) == restoredChars[slot],
+                "nativeInit lost a Sheik pick or corrupted a Zelda pick during restore");
+      Require(cspCalls == std::vector<std::pair<u32, u8>>({{0u, 0x13u}, {3u, 0x13u}}),
+              "nativeInit did not refresh Sheik CSP portraits/names for restored Sheik slots");
+    }
+    report << "PASS: native CSS init preserves mixed Sheik and Zelda picks across roster reloads, connect code entry, and post-match returns\n";
+    {
+      auto stringAt = [](u32 address) {
+        std::string value;
+        for (unsigned i = 0; i < 64; ++i)
+        {
+          const u8 c = Memory::Read_U8(address + i);
+          if (!c) break;
+          value += char(c);
+        }
+        return value;
+      };
+      Runner cards(nativeInit);
+      cards.Status(3, 0);
+      const auto status = Runner::Css + nativeInit.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+      Memory::Write_U8(1, status + 9);
+      Memory::Write_U8(3, status + 32); // slots 0 & 1 claimed, slot 2 unclaimed
+      Memory::Write_U8(0, status + 12);
+      Memory::Write_U8(2, status + 13);
+      Memory::Write_U8(4, status + 14);
+      Memory::Write_U8(4, status + 15);
+      const std::string testNames[4] = {"Alice", "100%MaxFifteen!", "Bob", ""};
+      for (unsigned i = 0; i < 4; ++i)
+      {
+        const u32 dst = Runner::Css + nativeInit.Symbol("CSSDT_LOCAL_TEAMS_NAMES") + i * 31;
+        Memory::CopyToEmu(dst, testNames[i].c_str(), testNames[i].size() + 1);
+      }
+      Memory::Write_U32(Runner::Buffer, Runner::R13 - 0x49C8);
+      Memory::Write_U32(0x81207000, Runner::Buffer + 0x60);
+      cards.services[0x80370E44] = [] { PowerPC::ppcState.gpr[3] = 0x81208000; };
+      for (unsigned joint : {1u, 36u})
+      {
+        Memory::Write_U32(0x81300000 + joint * 0x100, 0x81100000 + joint * 0x100 + 0x18);
+        Memory::Write_U32(0x81400000 + joint * 0x100, 0x81210000 + joint * 0x100 + 0x18);
+      }
+      Memory::Write_U32(0x81410000, 0x81400100 + 8);
+      Memory::Write_U32(0x81411000, 0x81410000 + 8);
+      Memory::Write_U32(0x81412000, 0x81411000 + 0x58);
+      Memory::Write_U32(0x81413000, 0x81412000);
+      Memory::Write_U32(0x00680048, 0x81412000 + 4);
+      cards.services[0x8035E24C] = [] {};
+      cards.services[0x80371590] = [] {};
+      for (unsigned i = 0; i < 4; ++i)
+      {
+        const u32 cursor = 0x81200000 + i * 0x100, token = 0x81203000 + i * 0x100;
+        Memory::Write_U32(cursor, 0x804A0BC0 + 4 * i); Memory::Write_U32(token, 0x804A0BD0 + 4 * i);
+        Memory::Write_U32(cursor + 0x40, cursor); Memory::Write_U32(token + 0x40, token);
+        Memory::Write_U32(cursor + 0x80, cursor + 0x40 + 0x28); Memory::Write_U32(token + 0x80, token + 0x40 + 0x28);
+        const u32 tagData = 0x81205000 + i * 0x100, refText = 0x81206000 + i * 0x100;
+        Memory::Write_U32(tagData, 0x803F0E8C + i * 12);
+        Memory::Write_U32(refText, tagData);
+        const float refX = -26.0f + i * 15.4f;
+        writeFloat(refX, refText + 0x00);
+        writeFloat(19.0f, refText + 0x04);
+        const float cardCx = refX + 4.64f;
+        const u32 parentJoint = 0x8110F000 + i * 0x20;
+        writeFloat(2.0f, parentJoint + 0x38);
+        writeFloat(-1.0f, parentJoint + 0x3C);
+        for (unsigned comp = 0; comp < 3; ++comp)
+        {
+          const u32 jointAddr = 0x81100000 + ((comp == 0 ? 41u : comp == 1 ? 51u : 56u) + i) * 0x100;
+          writeFloat(1.0f, jointAddr + 0x2C);
+          writeFloat(1.0f, jointAddr + 0x30);
+          if (comp == 0)
+          {
+            writeFloat(cardCx, jointAddr + 0x38);
+            writeFloat(-3.4f, jointAddr + 0x3C);
+            writeFloat(-1.5f + i * 0.1f, jointAddr + 0x40);
+          }
+          else if (comp == 1)
+          {
+            writeFloat(cardCx + 1.0f, jointAddr + 0x38);
+            writeFloat(-1.4f, jointAddr + 0x3C);
+          }
+          else
+          {
+            Memory::Write_U32(parentJoint, jointAddr + 0x0C);
+            writeFloat(cardCx - 2.0f + 0.5f, jointAddr + 0x38);
+            writeFloat(-3.4f - (-1.0f) + 0.4f, jointAddr + 0x3C);
+          }
+        }
+      }
+      cards.services[nativeInit.Symbol("JObj_GetJObjChild")] = [] {
+        auto& cpu = PowerPC::ppcState;
+        Memory::Write_U32((cpu.gpr[3] == 0x81208000 ? 0x81210000 : 0x81100000) + cpu.gpr[5] * 0x100, cpu.gpr[4]);
+      };
+      cards.services[nativeInit.Symbol("HSD_PadFlushQueue")] = [] {};
+      cards.services[nativeInit.Symbol("JObj_SetFlagsAll")] = [] {};
+      std::vector<u32> createdTexts;
+      std::map<u32, std::vector<std::pair<float, float>>> subtextPositions;
+      std::map<u32, std::vector<u32>> subtextColors;
+      std::map<u32, std::vector<std::pair<std::string, u32>>> subtextUpdates;
+      cards.services[nativeInit.Symbol("Text_CreateStruct")] = [&] {
+        const u32 addr = 0x81250000 + u32(createdTexts.size()) * 0x200;
+        createdTexts.push_back(addr);
+        PowerPC::ppcState.gpr[3] = addr;
+      };
+      cards.services[nativeInit.Symbol("Text_InitializeSubtext")] = [&] {
+        auto& cpu = PowerPC::ppcState;
+        auto& vec = subtextPositions[cpu.gpr[3]];
+        const u32 idx = u32(vec.size());
+        vec.push_back({float(rPS0(1)), float(rPS0(2))});
+        cpu.gpr[3] = idx;
+      };
+      cards.services[nativeInit.Symbol("Text_UpdateSubtextSize")] = [] {};
+      cards.services[nativeInit.Symbol("Text_ChangeTextColor")] = [&] {
+        auto& cpu = PowerPC::ppcState;
+        subtextColors[cpu.gpr[3]].push_back(Memory::Read_U32(cpu.gpr[5]));
+      };
+      cards.services[nativeInit.Symbol("Text_UpdateSubtextContents")] = [&] {
+        auto& cpu = PowerPC::ppcState;
+        subtextUpdates[cpu.gpr[3]].push_back({stringAt(cpu.gpr[5]), cpu.gpr[6]});
+      };
+      cards.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+      Require(createdTexts.size() == 6, "InitNativeLocalTeams created wrong number of card text structs for 3-P");
+      const float shifts3[3] = {-2.175f, -6.4f, -10.625f};
+      const float scale3 = 0.70f;
+      const u32 expectedPorts[3] = {1u, 3u, 3u};
+      for (unsigned card = 0; card < 3; ++card)
+      {
+        const u32 orderIdx = 2 - card;
+        const u32 portText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_TEXTS") + card * 4);
+        const u32 nameText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_NAME_TEXTS") + card * 4);
+        Require(portText == createdTexts[orderIdx * 2] && nameText == createdTexts[orderIdx * 2 + 1],
+                "card P#/displayName HSD_Text structs were not created in descending slot order");
+        const u32 teamCacheOffset = card * 12 + 8;
+        Require(std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_PIVOT_DX") + teamCacheOffset) - 0.5f) < 0.001f &&
+                    std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_PIVOT_DY") + teamCacheOffset) - 0.4f) < 0.001f &&
+                    std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_ORIGINAL_SX") + teamCacheOffset) - 1.0f) < 0.001f &&
+                    std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_ORIGINAL_SY") + teamCacheOffset) - 1.0f) < 0.001f,
+                "parent-aware joint pivot/scale caching failed");
+        const float refX = -26.0f + card * 15.4f;
+        const float newCx = refX + 4.64f + shifts3[card];
+        const float anchorTy = 19.0f - 14.1f;
+        const float baseZ = (-1.5f + card * 0.1f) + card * (-0.03f);
+        Require(Memory::Read_U8(portText + 0x48) == 0 && Memory::Read_U8(portText + 0x49) == 1 &&
+                    Memory::Read_U8(portText + 0x4A) == 0 && Memory::Read_U8(portText + 0x4C) == 1 &&
+                    Memory::Read_U8(portText + 0x4D) == 1 &&
+                    Memory::Read_U32(portText + 0x30) == 0x00000078 &&
+                    std::abs(readFloat(portText + 0x00) - (newCx - 6.30f * scale3)) < 0.001f &&
+                    std::abs(readFloat(portText + 0x04) - (anchorTy - 1.65f)) < 0.001f &&
+                    std::abs(readFloat(portText + 0x08) - (baseZ + 0.005f)) < 0.001f &&
+                    std::abs(readFloat(portText + 0x24) - (0.105f * scale3)) < 0.001f &&
+                    std::abs(readFloat(portText + 0x28) - (0.085f * scale3)) < 0.001f,
+                "card P# HSD_Text scaled geometry, transparency or flags are incorrect");
+        Require(subtextColors[portText] == std::vector<u32>{0x00000078} &&
+                    subtextUpdates[portText] == std::vector<std::pair<std::string, u32>>{{"P%d", expectedPorts[card]}} &&
+                    Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_CACHE") + card) == expectedPorts[card],
+                "card P# text content, color or cache mismatch");
+
+        Require(Memory::Read_U8(nameText + 0x48) == 1 && Memory::Read_U8(nameText + 0x49) == 1 &&
+                    Memory::Read_U8(nameText + 0x4A) == 1 && Memory::Read_U8(nameText + 0x4C) == 1 &&
+                    Memory::Read_U8(nameText + 0x4D) == 1 &&
+                    std::abs(readFloat(nameText + 0x00) - (newCx - 5.52f * scale3)) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x04) - (anchorTy + 14.24f * scale3)) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x08) - (baseZ + 0.025f)) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x0C) - 240.0f) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x10) - 32.0f) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x24) - (0.046f * scale3)) < 0.001f &&
+                    std::abs(readFloat(nameText + 0x28) - (0.046f * scale3)) < 0.001f,
+                "card displayName HSD_Text scaled box, scale or Z layering is incorrect");
+        const u32 expectedArg = Runner::Css + nativeInit.Symbol("CSSDT_LOCAL_TEAMS_NAMES") + card * 31;
+        Require(subtextColors[nameText] == std::vector<u32>({0xFF, 0xFF, 0xFF, 0xFF, 0xFFFFFFFF}) &&
+                    subtextUpdates[nameText].size() == 5 &&
+                    subtextPositions[nameText][0].first == 118.0f && subtextPositions[nameText][4].first == 120.0f,
+                "card displayName outline/foreground subtexts are incorrect");
+        for (const auto& entry : subtextUpdates[nameText])
+          Require(entry.first == "%s" && entry.second == expectedArg,
+                  "card displayName did not format with %s or read its card's Shift-JIS slot");
+      }
+      Require(Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_TEXTS") + 12) == 0 &&
+                  Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_NAME_TEXTS") + 12) == 0 &&
+                  Memory::Read_U8(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_CACHE") + 3) == 0xFF,
+              "unused 4th card text slot was not left cleared");
+      const float expectedPortYOffs[4] = {-1.80f, -1.80f, -1.65f, -1.55f};
+      const float expectedScales[4] = {1.0f, 1.0f, 0.70f, 0.53f};
+      for (unsigned count : {1u, 2u, 3u, 4u})
+      {
+        cards.Status(count, 0);
+        createdTexts.clear();
+        Memory::Write_U8(1, status + 9);
+        cards.Run(Elf::Base, {Elf::Base + u32(nativeInit.text.size())});
+        Require(createdTexts.size() == count * 2u, "InitNativeLocalTeams created wrong number of card text structs");
+        for (unsigned card = 0; card < count; ++card)
+        {
+          const u32 portText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_TEXTS") + card * 4);
+          const u32 nameText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_NAME_TEXTS") + card * 4);
+          const float anchorTy = 19.0f - 14.1f;
+          Require(std::abs(readFloat(portText + 0x04) - (anchorTy + expectedPortYOffs[count - 1])) < 0.001f,
+                  "per-count card P# vertical offset is incorrect");
+          Require(std::abs(readFloat(nameText + 0x04) - (anchorTy + 14.24f * expectedScales[count - 1])) < 0.001f,
+                  "per-count card displayName vertical offset changed unexpectedly");
+        }
+      }
+    }
     for(unsigned count : {1u,2u,3u,4u})
     {
       Runner draw(nativeDraw); draw.Status(count,0);
@@ -817,21 +1098,75 @@ void Run(const std::string& directory, std::ofstream& report)
         Memory::Write_U32(data,0x803F0E8C+player*12); Memory::Write_U32(name,data);
       }
       for (unsigned player=0;player<count;++player)
+      {
+        writeFloat(-0.5f, Runner::Css + nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_Z") + player * 4);
+        const u32 portText = 0x81250000 + player * 0x200;
+        const u32 nameText = 0x81250100 + player * 0x200;
+        const u32 portGObj = 0x81260000 + player * 0x40;
+        const u32 nameGObj = 0x81260020 + player * 0x40;
+        Memory::Write_U32(portText, Runner::Css + nativeDraw.Symbol("CSSDT_CARD_PORT_TEXTS") + player * 4);
+        Memory::Write_U32(nameText, Runner::Css + nativeDraw.Symbol("CSSDT_CARD_NAME_TEXTS") + player * 4);
+        Memory::Write_U8(1, portText + 0x4D);
+        Memory::Write_U8(1, nameText + 0x4D);
+        Memory::Write_U32(portGObj, portText + 0x54);
+        Memory::Write_U32(nameGObj, nameText + 0x54);
+        Memory::Write_U32(portText, portGObj + 0x2C);
+        Memory::Write_U32(nameText, nameGObj + 0x2C);
         for (unsigned component=0;component<3;++component)
         {
           const unsigned joint=(component==0?41:component==1?51:56)+player;
           const auto offset=player*12+component*4;
+          const float dx = component * 0.25f, dy = component * 0.5f;
           Memory::Write_U32(0x81100000+joint*0x100,Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_JOINTS")+offset);
-          writeFloat(float(player*15.4f),Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_X")+offset);
+          writeFloat(float(player*15.4f) + dx, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_X")+offset);
+          writeFloat(-3.4f + dy, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_Y")+offset);
+          writeFloat(1.0f, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_SX")+offset);
+          writeFloat(1.0f, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_ORIGINAL_SY")+offset);
+          writeFloat(dx, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_PIVOT_DX")+offset);
+          writeFloat(dy, Runner::Css+nativeDraw.Symbol("CSSDT_NATIVE_PIVOT_DY")+offset);
         }
+      }
       draw.services[nativeDraw.Symbol("JObj_GetJObjChild")]=[] {
         auto& cpu=PowerPC::ppcState; Memory::Write_U32(0x81100000+cpu.gpr[5]*0x100,cpu.gpr[4]);
       };
       for (const auto address : {nativeDraw.Symbol("JObj_SetFlagsAll"),nativeDraw.Symbol("JObj_SetFlags"),nativeDraw.Symbol("JObj_ClearFlags"),0x80391070u})
         draw.services[address]=[]{};
       draw.services[nativeDraw.Symbol("JObj_SetFlagsAll")]=[&hiddenGroups]{ hiddenGroups.push_back((PowerPC::ppcState.gpr[3]-0x81100000)/0x100); };
-      draw.services[0x80390EB8]=[]{ PowerPC::ppcState.gpr[3]=2; };
-      draw.services[0x803709DC]=[&order]{ order.push_back((PowerPC::ppcState.gpr[3]-0x81100000)/0x100); };
+      draw.services[0x80390EB8]=[]{ PowerPC::ppcState.gpr[3] += 10; };
+      draw.services[0x803709DC]=[&order]{
+        auto& cpu = PowerPC::ppcState;
+        Require(cpu.gpr[5] >= 10 && cpu.gpr[5] <= 12, "HSD_JObjDispAll received wrong converted render pass");
+        order.push_back((cpu.gpr[3]-0x81100000)/0x100);
+      };
+      draw.services[nativeDraw.Symbol("Text_DrawEachFrame")]=[&order, count]{
+        auto& cpu = PowerPC::ppcState;
+        const u32 gobj = cpu.gpr[3];
+        const u32 text = Memory::Read_U32(gobj + 0x2C);
+        Require(Memory::Read_U8(text + 0x4D) == 0, "card text was still hidden during per-card Text_DrawEachFrame");
+        Require(cpu.gpr[4] < 3, "card text pass out of range");
+        for (unsigned player = 0; player < count; ++player)
+        {
+          if (gobj == 0x81260000 + player * 0x40) { order.push_back(1000u + player); return; }
+          if (gobj == 0x81260020 + player * 0x40) { order.push_back(2000u + player); return; }
+        }
+        Require(false, "unexpected GObj passed to Text_DrawEachFrame");
+      };
+      for (u32 nonDrawPass : {0u, 1u})
+      {
+        PowerPC::ppcState.gpr[3] = Runner::Buffer;
+        PowerPC::ppcState.gpr[4] = nonDrawPass;
+        PowerPC::ppcState.spr[SPR_LR] = Runner::Return;
+        draw.Run(nativeDraw.Symbol("DRAW_CALLBACK") + 4, {Runner::Return});
+        Require(order.empty(), "native local Teams drew card layers on non-final render pass");
+      }
+      const float expectedScales[4] = {1.0f, 1.0f, 0.70f, 0.53f};
+      const float expectedShifts[4][4] = {
+          {0.0f, 0.0f, 0.0f, 0.0f},
+          {0.0f, 2.6f, 5.2f, 7.8f},
+          {-2.175f, -6.4f, -10.625f, 0.0f},
+          {-3.4075f, -10.5358f, -17.6642f, -24.7925f},
+      };
+      const float cardScale = expectedScales[count - 1];
       for (unsigned pass=0;pass<3;++pass)
       {
         const auto drawnBefore=order.size();
@@ -839,21 +1174,62 @@ void Run(const std::string& directory, std::ofstream& report)
           Memory::Write_U8(u8((count+pass-1)%4+1),Runner::Css+nativeDraw.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+1);
         for(unsigned player=0;player<count;++player)
           Memory::Write_U8(pass==0?25:u8(player),0x803F0DFC+36*player+0x0E);
-        PowerPC::ppcState.gpr[3]=Runner::Buffer; PowerPC::ppcState.gpr[4]=1;
+        PowerPC::ppcState.gpr[3]=Runner::Buffer; PowerPC::ppcState.gpr[4]=2;
         PowerPC::ppcState.spr[SPR_LR]=Runner::Return;
         draw.Run(nativeDraw.Symbol("DRAW_CALLBACK")+4,{Runner::Return});
-        Require(order.size()-drawnBefore==count*(pass?3u:2u),
+        Require(order.size()-drawnBefore==count*3u*(pass?5u:4u),
                 "backend resize changed the drawn player fields before CSS reset");
-        const float shift=count==1?0:count==2?-2.6f:count==3?6.4f:9.4f;
-        if(count>=2) Require(std::abs(readFloat(0x81100000+42*0x100+0x38)-(15.4f-shift))<0.001f,
-                            "panel moved to a new roster's spacing before CSS reset");
-        if(count>=2) Require(std::abs(readFloat(0x81100000+(40+count)*0x100+0x38)-18.0f)<0.001f,
-                            "two/three/four-player layouts do not share the same right margin before status text");
+        if (count >= 2)
+        {
+          const float bg0x = readFloat(0x81100000 + 41 * 0x100 + 0x38);
+          const float bgLastX = readFloat(0x81100000 + (40 + count) * 0x100 + 0x38);
+          Require(std::abs((bg0x - 7.25f * cardScale) - (-7.25f)) < 0.005f &&
+                      std::abs((bgLastX + 7.25f * cardScale) - 25.25f) < 0.005f,
+                  "scaled multi-card layout exceeded the half-screen container bounds");
+          for (unsigned player = 0; player + 1 < count; ++player)
+          {
+            const float xCurr = readFloat(0x81100000 + (41 + player) * 0x100 + 0x38);
+            const float xNext = readFloat(0x81100000 + (41 + player + 1) * 0x100 + 0x38);
+            Require(xNext - xCurr > 14.5f * cardScale + 0.01f,
+                    "adjacent cards overlap instead of sitting side-by-side with a gap");
+          }
+          Require(std::abs(readFloat(0x81100000 + 42 * 0x100 + 0x38) - (15.4f + expectedShifts[count - 1][1])) < 0.005f,
+                  "panel moved to a new roster's spacing before CSS reset");
+        }
+        for (unsigned player = 0; player < count; ++player)
+        {
+          const float cardZ = -0.5f + (count > 2 ? float(player) * -0.03f : 0.0f);
+          for (unsigned comp : {0u, 1u, 2u})
+          {
+            if (comp == 1u && !pass) continue;
+            const unsigned joint = (comp == 0 ? 41u : comp == 1 ? 51u : 56u) + player;
+            const u32 jointAddr = 0x81100000 + joint * 0x100;
+            const float dx = comp * 0.25f, dy = comp * 0.5f;
+            const float expX = (player * 15.4f + dx) + expectedShifts[count - 1][player] + (cardScale - 1.0f) * dx;
+            const float expY = (-3.4f + dy) + (cardScale - 1.0f) * dy;
+            Require(std::abs(readFloat(jointAddr + 0x2C) - cardScale) < 0.001f &&
+                        std::abs(readFloat(jointAddr + 0x30) - cardScale) < 0.001f &&
+                        std::abs(readFloat(jointAddr + 0x38) - expX) < 0.005f &&
+                        std::abs(readFloat(jointAddr + 0x3C) - expY) < 0.005f &&
+                        std::abs(readFloat(jointAddr + 0x40) - (cardZ + comp * 0.01f)) < 0.001f,
+                    "native CSS card scale, pivot transform or Z layering is incorrect");
+          }
+          Require(Memory::Read_U8(0x81250000 + player * 0x200 + 0x4D) == 1 &&
+                      Memory::Read_U8(0x81250100 + player * 0x200 + 0x4D) == 1,
+                  "card text remained unhidden for trailing GXLink pass");
+        }
       }
       std::vector<unsigned> expected;
       for(unsigned pass=0;pass<3;++pass) for(unsigned i=count;i>0;--i)
-        for(unsigned base : {41u,51u,56u}) if(pass||base!=51) expected.push_back(base+i-1);
-      Require(order==expected,"overlapping panels did not draw in descending player order");
+      {
+        const unsigned p = i - 1;
+        for (unsigned sub = 0; sub < 3; ++sub) expected.push_back(41u + p);
+        for (unsigned sub = 0; sub < 3; ++sub) expected.push_back(1000u + p);
+        if (pass) for (unsigned sub = 0; sub < 3; ++sub) expected.push_back(51u + p);
+        for (unsigned sub = 0; sub < 3; ++sub) expected.push_back(56u + p);
+        for (unsigned sub = 0; sub < 3; ++sub) expected.push_back(2000u + p);
+      }
+      Require(order==expected,"overlapping panels did not draw card layers in descending per-card order");
       Require(std::find(hiddenGroups.begin(),hiddenGroups.end(),1)==hiddenGroups.end() &&
               std::find(hiddenGroups.begin(),hiddenGroups.end(),39)==hiddenGroups.end(),"VS banner was visible or Back was hidden");
       for(unsigned player=0;player<4;++player)
@@ -1110,18 +1486,49 @@ void Run(const std::string& directory, std::ofstream& report)
         exitMenu.Run(css.Symbol("FN_NATIVE_ROSTER_REQUEST"), {Runner::Return});
         Require(Memory::Read_U32(css.Symbol("CSS_SAVED_CURSORS_ADDR")) == 0,
                 "menu exit roster request kept saved cursor mask");
+
+        // Sorted insert when P1 (port 0) joins ahead of P4 (port 3): {3} -> {0, 3}
+        Runner sortedJoin(css); sortedJoin.Status(1, 0);
+        const auto sStatus = Runner::Css + css.Symbol("CSSDT_LOCAL_TEAMS_STATUS");
+        Memory::Write_U8(1, sStatus + 9);
+        Memory::Write_U8(2, sStatus + 34);
+        Memory::Write_U8(1, sStatus + 32);
+        Memory::Write_U8(3, sStatus + 12);
+        Memory::Write_U32(Runner::Buffer + 0x700, 0x804A0BC0);
+        writeFloat(7.75f, Runner::Buffer + 0x70C);
+        writeFloat(-6.25f, Runner::Buffer + 0x710);
+        sortedJoin.pollResponse.assign(LocalTeams::StatusSize, 0);
+        sortedJoin.pollResponse[0] = 1; sortedJoin.pollResponse[1] = 2; sortedJoin.pollResponse[9] = 1;
+        sortedJoin.Run(css.Symbol("FN_NATIVE_ROSTER_REQUEST"), {Runner::Return});
+        std::array<u8, 36> sortedSaved{};
+        Memory::CopyFromEmu(sortedSaved.data(), css.Symbol("CSS_SAVED_CURSORS_ADDR"), sortedSaved.size());
+        Require(Memory::Read_U32(css.Symbol("CSS_SAVED_CURSORS_ADDR")) == (1u << 3),
+                "sorted Start-hold add did not save entering port 4 cursor under physical port");
+        runPreservedInit(sortedSaved, 2, 3, {{0, 3, 4, 4}});
+        Require(std::abs(readFloat(0x81200100 + 0x0C) - 7.75f) < 0.001f &&
+                std::abs(readFloat(0x81200100 + 0x10) - (-6.25f)) < 0.001f,
+                "port 4 cursor did not restore onto sorted slot 1 after port 1 joined ahead of it");
+        const float left0 = readFloat(0x803F0DFC + 0x1C), right0 = readFloat(0x803F0DFC + 0x20);
+        Require(std::abs(readFloat(0x81200000 + 0x0C) - (left0 + right0) * 0.5f) < 0.001f &&
+                std::abs(readFloat(0x81200000 + 0x10) + 3.4f) < 0.001f,
+                "newly inserted port 1 hand did not spawn on sorted slot 0 team marker");
       }
     }
     report << "PASS: adding players via count selector or Start-hold preserves existing cursor coordinates while spawning newly added cursors on team markers\n";
     {
       Elf loadCss(directory+"load-css.elf");
-      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=1\nBasePort=49120\n",
+      const std::string id1Path = File::GetUserPath(D_CONFIG_IDX) + "selftest-css-p1.json";
+      Require(File::WriteStringToFile("{\"uid\":\"css-u1\",\"playKey\":\"css-pk1\",\"displayName\":\"FifteenCharName!\",\"connectCode\":\"CSS#1\"}", id1Path),
+              "write selftest-css-p1.json");
+      struct ScopedDelete { std::string path; ~ScopedDelete() { File::Delete(path); } } delId1{id1Path};
+      File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=1\nBasePort=49120\nIdentity1=" + id1Path + "\n",
                               File::GetUserPath(D_CONFIG_IDX)+"local-teams.ini");
       LocalTeamsCoordinator ui(0,nullptr, [] { return u16(0x8); });
       const u8 buttons[8]={};
       // Use the real coordinator for each command and each new CSS query.
       // Only retail game services are stubbed; the DMA pointer still rounds
       // down to 32 bytes exactly as EXIDma does on the user's game.
+      u8 lastCmd = 0;
       auto transfer=[&](Runner& runner) {
         auto& cpu=PowerPC::ppcState;
         const u32 address=cpu.gpr[3]&0x03FFFFE0;
@@ -1130,19 +1537,39 @@ void Run(const std::string& directory, std::ofstream& report)
           std::vector<u8> packet(cpu.gpr[4]);
           Memory::CopyFromEmu(packet.data(),address,packet.size());
           runner.packets.push_back(packet);
+          lastCmd = packet[0];
           if(packet[0]==0xC8)
           {
             Require(packet.size()==18 && ui.ChangeCount(packet.data()+1),
                     "real coordinator did not receive/accept the clicked roster");
+          }
+          else if (packet[0] == LocalTeams::NamesCommand)
+          {
+            Require(packet.size() == 1, "CSS load sent an invalid local teams names request");
           }
           else Require(packet.size()==LocalTeams::PollPayloadSize+1 && packet[0]==0xC5 && packet[1]==0x83,
                        "CSS reload sent an invalid configuration query");
         }
         else
         {
-          Require(cpu.gpr[4]==LocalTeams::StatusSize,"roster round-trip used wrong response size");
-          const auto status=ui.Poll(u8(SlippiMatchmaking::TEAMS|0x80),buttons);
-          Memory::CopyToEmu(address,status.data(),status.size());
+          if (lastCmd == LocalTeams::NamesCommand)
+          {
+            Require(cpu.gpr[4] == LocalTeams::NamesResponseSize, "names round-trip used wrong response size");
+            const auto names = ui.DisplayNames();
+            std::vector<u8> bytes;
+            for (unsigned i = 0; i < 4; ++i)
+            {
+              const std::string encoded = ConvertStringForGame(names[i], 15);
+              bytes.insert(bytes.end(), encoded.begin(), encoded.end());
+            }
+            Memory::CopyToEmu(address, bytes.data(), bytes.size());
+          }
+          else
+          {
+            Require(cpu.gpr[4]==LocalTeams::StatusSize,"roster round-trip used wrong response size");
+            const auto status=ui.Poll(u8(SlippiMatchmaking::TEAMS|0x80),buttons);
+            Memory::CopyToEmu(address,status.data(),status.size());
+          }
         }
       };
       for(unsigned stackOffset : {0u,8u,16u,24u})
@@ -1182,6 +1609,14 @@ void Run(const std::string& directory, std::ofstream& report)
           Require(Memory::Read_U8(Runner::SceneData+0x71+36*player)==(player<requested?0:3) &&
                   Memory::Read_U8(Runner::SceneData+0x70+36*player)==26,
                   "new CSS did not create exactly the requested empty player fields");
+        std::string cssP1Name;
+        for (unsigned c = 0; c < 31; ++c)
+        {
+          const u8 ch = Memory::Read_U8(Runner::Css + loadCss.Symbol("CSSDT_LOCAL_TEAMS_NAMES") + c);
+          if (!ch) break;
+          cssP1Name += char(ch);
+        }
+        Require(cssP1Name == "FifteenCharName", "SceneLoad_CSS did not fetch and copy 15-char truncated card display name");
       }
     }
     report << "PASS: real coordinator DMA round-trip and fresh CSS load cycle 1-2-3-4-1 at every 8-byte stack alignment, with matching empty player fields\n";
@@ -1255,7 +1690,24 @@ void Run(const std::string& directory, std::ofstream& report)
       ui.services[text.Symbol("GObj_AddProc")]=[]{};
       ui.services[text.Symbol("Text_CreateStruct")]=[&]{ cpu.gpr[3]=0x81120000+0x100*textObjects++; };
       ui.services[text.Symbol("FG_CreateSubtext")]=[&]{
-        if(subtexts==15) Require(std::abs(rPS0(3)-121.0)<0.001,"P4 row lost the 23-unit spacing of P1-P3");
+        const double y = rPS0(3);
+        const double shift = native ? -12.0 : 0.0;
+        if (subtexts == 0)
+          Require(std::abs(y - (23.0 + shift)) < 0.001, "header Y position mismatch");
+        else if (subtexts == 1 || subtexts == 2)
+          Require(std::abs(y - (52.0 + shift)) < 0.001, "P1 row Y position mismatch");
+        else if (subtexts == 3 || subtexts == 4)
+          Require(std::abs(y - (75.0 + shift)) < 0.001, "P2 row Y position mismatch");
+        else if (subtexts == 5 || subtexts == 6)
+          Require(std::abs(y - (98.0 + shift)) < 0.001, "P3 row Y position mismatch");
+        else if (subtexts == 7)
+          Require(std::abs(y - 132.5) < 0.001, "gray Hold Z / Hold START help line Y moved");
+        else if (subtexts == 8)
+          Require(std::abs(y - 152.5) < 0.001, "gray D-Pad chat help line Y moved");
+        else if (subtexts >= 11 && subtexts <= 14)
+          Require(std::abs(y - (52.0 + 18.0 * (subtexts - 11) + shift)) < 0.001, "error line Y position mismatch");
+        else if (subtexts == 15 || subtexts == 16)
+          Require(std::abs(y - 109.0) < 0.001, "P4 row lost the 23-unit spacing above Hold Z help text");
         cpu.gpr[3]=subtexts; ++subtexts;
       };
       ui.Run(Elf::Base,{Elf::Base+u32(text.text.size())});
@@ -1272,10 +1724,17 @@ void Run(const std::string& directory, std::ofstream& report)
         const u8 room[]={0x82,0x4F,0x82,0x4F,0x82,0x4F,0x82,0x50,0x82,0x50};
         for(unsigned i=0;i<5;++i)Memory::Write_U16((u16(room[2*i])<<8)|room[2*i+1],0x804A0740+3*i);
         std::map<unsigned,std::string> lines;
+        struct CardPortUpdate { u32 text; u32 idx; std::string fmt; u32 num; };
+        std::vector<CardPortUpdate> cardPortUpdates;
         auto stringAt=[](u32 address){ std::string value; for(unsigned i=0;i<200;++i){const auto c=Memory::Read_U8(address+i);if(!c)break;value+=char(c);}return value; };
         ui.services[text.Symbol("Text_UpdateSubtextContents")]=[&]{
           const auto format=stringAt(cpu.gpr[5]);
           const unsigned index=cpu.gpr[4];
+          if (cpu.gpr[3] != 0x81120000)
+          {
+            cardPortUpdates.push_back({cpu.gpr[3], index, format, cpu.gpr[6]});
+            return;
+          }
           lines[index]=format;
           if(format=="P%d: %s") lines[index]+="|"+std::to_string(cpu.gpr[6])+"|"+stringAt(cpu.gpr[7]);
           else if(format.find("%s")!=std::string::npos) lines[index]+="|"+stringAt(cpu.gpr[6]);
@@ -1352,9 +1811,323 @@ void Run(const std::string& directory, std::ofstream& report)
                     "Hold START to join hid Press Z to clear error");
         checkPressZ(0, 0, 2, 3, {{0, 2, 4, 4}}, 0x0F, idle, "",
                     "Hold START to join appeared when native Local Teams was disabled");
+
+        Memory::Write_U8(1, Runner::Css + text.Symbol("CSSDT_NATIVE_INITIALIZED"));
+        Memory::Write_U8(3, Runner::Css + text.Symbol("CSSDT_NATIVE_VISIBLE_COUNT"));
+        Memory::Write_U32(0x81250000, Runner::Css + text.Symbol("CSSDT_CARD_PORT_TEXTS") + 0);
+        Memory::Write_U32(0x81250200, Runner::Css + text.Symbol("CSSDT_CARD_PORT_TEXTS") + 4);
+        Memory::Write_U32(0x81250400, Runner::Css + text.Symbol("CSSDT_CARD_PORT_TEXTS") + 8);
+        Memory::Write_U8(1, Runner::Css + text.Symbol("CSSDT_CARD_PORT_CACHE") + 0);
+        Memory::Write_U8(2, Runner::Css + text.Symbol("CSSDT_CARD_PORT_CACHE") + 1);
+        Memory::Write_U8(3, Runner::Css + text.Symbol("CSSDT_CARD_PORT_CACHE") + 2);
+        Memory::Write_U8(0xFF, Runner::Css + text.Symbol("CSSDT_CARD_PORT_CACHE") + 3);
+        Memory::Write_U8(1, status + 9);
+        Memory::Write_U8(0, status + 12);
+        Memory::Write_U8(1, status + 13);
+        Memory::Write_U8(2, status + 14);
+        Memory::Write_U8(4, status + 15);
+        cardPortUpdates.clear();
+        cpu.gpr[3] = Runner::Buffer + 0x800; cpu.spr[SPR_LR] = Runner::Return;
+        ui.Run(text.Symbol("CSS_ONLINE_TEXT_THINK") + 4, {Runner::Return});
+        Require(cardPortUpdates.empty(), "card P# refreshed when cached ports matched");
+        Memory::Write_U8(3, status + 13); // slot 1 claimed by controller port 4 -> P4
+        Memory::Write_U8(4, status + 14); // slot 2 unclaimed -> stays P3 (cached 3)
+        cpu.gpr[3] = Runner::Buffer + 0x800; cpu.spr[SPR_LR] = Runner::Return;
+        ui.Run(text.Symbol("CSS_ONLINE_TEXT_THINK") + 4, {Runner::Return});
+        Require(cardPortUpdates.size() == 1 && cardPortUpdates[0].text == 0x81250200 &&
+                    cardPortUpdates[0].idx == 0 && cardPortUpdates[0].fmt == "P%d" && cardPortUpdates[0].num == 4 &&
+                    Memory::Read_U8(Runner::Css + text.Symbol("CSSDT_CARD_PORT_CACHE") + 1) == 4,
+                "card P# did not update dynamically when a different controller port claimed the card");
+        cardPortUpdates.clear();
+        cpu.gpr[3] = Runner::Buffer + 0x800; cpu.spr[SPR_LR] = Runner::Return;
+        ui.Run(text.Symbol("CSS_ONLINE_TEXT_THINK") + 4, {Runner::Return});
+        Require(cardPortUpdates.empty(), "card P# updated redundantly after caching new controller port");
       }
     }
     report << "PASS: retail single/multiplayer setup reaches Slippi account/status init; same-team search/connecting text contains exact room; offline rules disabled; Hold START to join shown iff unadded pads are connected in Selecting state\n";
+
+    // Execute the deployed SlippiCSS.dat directly on Dolphin's PowerPC interpreter.
+    {
+      const std::string cssDatPath = File::GetSysDirectory() + "GameFiles" + DIR_SEP + "GALE01" + DIR_SEP + "SlippiCSS.dat";
+      std::ifstream datFile(cssDatPath, std::ios::binary);
+      Require(bool(datFile), ("missing deployed SlippiCSS.dat: " + cssDatPath).c_str());
+      const std::vector<u8> dat((std::istreambuf_iterator<char>(datFile)), {});
+      Require(dat.size() >= 0x40, "truncated SlippiCSS.dat");
+      auto readBe32 = [&](const std::vector<u8>& buf, size_t off) -> u32 {
+        return (u32(buf[off]) << 24) | (u32(buf[off + 1]) << 16) | (u32(buf[off + 2]) << 8) | u32(buf[off + 3]);
+      };
+      const u32 dataSize = readBe32(dat, 4);
+      const u32 relocCnt = readBe32(dat, 8);
+      const u32 rootCnt = readBe32(dat, 12);
+      Require(rootCnt >= 1 && 0x20 + dataSize + relocCnt * 4 + 8 <= dat.size(), "invalid SlippiCSS.dat HSD header");
+      const u32 mnFnOff = readBe32(dat, 0x20 + dataSize + relocCnt * 4);
+      const u32 codeOff = readBe32(dat, 0x20 + mnFnOff + 0x00);
+      const u32 rtblOff = readBe32(dat, 0x20 + mnFnOff + 0x04);
+      const u32 rtblCnt = readBe32(dat, 0x20 + mnFnOff + 0x08);
+      const u32 fnTblOff = readBe32(dat, 0x20 + mnFnOff + 0x0C);
+      Require(fnTblOff > codeOff && fnTblOff + 24 <= dataSize, "invalid SlippiCSS.dat mnFunction offsets");
+      const u32 codeLen = fnTblOff - codeOff;
+      std::array<u32, 3> fnOffsets{};
+      for (u32 i = 0; i < 3; ++i)
+      {
+        const u32 fid = readBe32(dat, 0x20 + fnTblOff + i * 8);
+        const u32 foff = readBe32(dat, 0x20 + fnTblOff + i * 8 + 4);
+        Require(fid < 3 && foff < codeLen, "invalid SlippiCSS.dat hook table entry");
+        fnOffsets[fid] = foff; // 0=minor_think, 1=minor_load, 2=minor_exit
+      }
+
+      constexpr u32 cssBase = 0x80C00000;
+      auto loadAndRelocateDat = [&]() {
+        Memory::Clear();
+        Memory::CopyToEmu(cssBase, dat.data() + 0x20 + codeOff, codeLen);
+        for (u32 i = 0; i < rtblCnt; ++i)
+        {
+          const u32 w0 = readBe32(dat, 0x20 + rtblOff + i * 8);
+          const u32 w1 = readBe32(dat, 0x20 + rtblOff + i * 8 + 4);
+          const u32 rtype = w0 >> 24;
+          const u32 coff = w0 & 0xFFFFFFu;
+          Require(coff < codeLen, "SlippiCSS.dat reloc coff out of bounds");
+          const u32 target = (w1 >= 0x80000000u) ? w1 : (cssBase + w1);
+          const u32 patchAddr = cssBase + coff;
+          if (rtype == 1) // R_PPC_ADDR32
+            Memory::Write_U32(target, patchAddr);
+          else if (rtype == 4) // R_PPC_ADDR16_LO
+            Memory::Write_U16(u16(target & 0xFFFFu), patchAddr);
+          else if (rtype == 6) // R_PPC_ADDR16_HA
+            Memory::Write_U16(u16(((target + 0x8000u) >> 16) & 0xFFFFu), patchAddr);
+          else if (rtype == 10) // R_PPC_REL24
+          {
+            const s32 rel = s32(target) - s32(patchAddr);
+            const u32 insn = Memory::Read_U32(patchAddr);
+            Memory::Write_U32((insn & 0xFC000003u) | (u32(rel) & 0x03FFFFFCu), patchAddr);
+          }
+          else
+            throw std::runtime_error("unexpected SlippiCSS.dat relocation type");
+        }
+      };
+
+      auto writeF32 = [](u32 addr, float val) {
+        u32 bits = 0;
+        std::memcpy(&bits, &val, 4);
+        Memory::Write_U32(bits, addr);
+      };
+      auto readF32 = [](u32 addr) -> float {
+        u32 bits = Memory::Read_U32(addr);
+        float val = 0.0f;
+        std::memcpy(&val, &bits, 4);
+        return val;
+      };
+
+      // Test A: minor_load / minor_think / minor_exit preserve r3 (minor_data) across vanilla CSS calls.
+      constexpr u32 meleeR13 = 0x804DB6A0u;
+      loadAndRelocateDat();
+      Interpreter interp;
+      auto resetCpu = [&]() {
+        auto& cpu = PowerPC::ppcState;
+        std::fill(std::begin(cpu.gpr), std::end(cpu.gpr), 0);
+        std::fill(std::begin(cpu.spr), std::end(cpu.spr), 0);
+        cpu.Exceptions = 0;
+        cpu.msr = 0x2030;
+        cpu.iCache.Init();
+        cpu.gpr[1] = Runner::Stack;
+        cpu.gpr[13] = meleeR13;
+        cpu.spr[SPR_LR] = Runner::Return;
+        interp.Init();
+      };
+
+      u32 capturedLoadR3 = 0, capturedThinkR3 = 0, capturedExitR3 = 0;
+      u32 capturedCspSlot = 0xFFFFFFFFu, capturedCspCharAtCall = 0xFFu, capturedAnnouncerChar = 0xFFu;
+      std::array<u32, 4> padDownInputs{};
+      u32 heapBump = 0x81200000;
+      u32 nextGobj = 0x81300000;
+      std::array<u32, 4> spawnedJobjRoots{};
+      unsigned spawnedJobjCount = 0;
+
+      auto setupSelectorTree = [&](u32 rootAddr) {
+        // JOBJ(root) -> child(zelda) -> sibling(sheik), each with dobj->mobj->mat(alpha @ +0x0C)
+        auto initJobj = [&](u32 j, u32 dobj, u32 mobj, u32 mat) {
+          for (u32 k = 0; k < 0x88; k += 4) Memory::Write_U32(0, j + k);
+          Memory::Write_U32(dobj, j + 0x18);
+          Memory::Write_U32(mobj, dobj + 0x08);
+          Memory::Write_U32(mat, mobj + 0x0C);
+          writeF32(mat + 0x0C, 0.5f);
+          writeF32(j + 0x2C, 1.0f); writeF32(j + 0x30, 1.0f); writeF32(j + 0x34, 1.0f);
+        };
+        initJobj(rootAddr + 0x000, rootAddr + 0x100, rootAddr + 0x140, rootAddr + 0x180);
+        initJobj(rootAddr + 0x200, rootAddr + 0x300, rootAddr + 0x340, rootAddr + 0x380);
+        initJobj(rootAddr + 0x400, rootAddr + 0x500, rootAddr + 0x540, rootAddr + 0x580);
+        Memory::Write_U32(rootAddr + 0x200, rootAddr + 0x010); // root->child = zelda
+        Memory::Write_U32(rootAddr + 0x400, rootAddr + 0x208); // zelda->sibling = sheik
+      };
+
+      auto runDatHook = [&](u32 entry, u32 argR3) {
+        auto& cpu = PowerPC::ppcState;
+        cpu.gpr[1] = Runner::Stack;
+        cpu.gpr[3] = argR3;
+        cpu.spr[SPR_LR] = Runner::Return;
+        cpu.pc = entry;
+        for (unsigned steps = 0; steps < 50000; ++steps)
+        {
+          if (cpu.pc == Runner::Return) return;
+          bool stub = true;
+          switch (cpu.pc)
+          {
+            case 0x8026688Cu: capturedLoadR3 = cpu.gpr[3]; break;
+            case 0x802669F4u: capturedThinkR3 = cpu.gpr[3]; break;
+            case 0x80266D70u: capturedExitR3 = cpu.gpr[3]; break;
+            case 0x80168C5Cu: capturedAnnouncerChar = cpu.gpr[3]; break;
+            case 0x8025DB34u:
+              capturedCspSlot = cpu.gpr[3];
+              capturedCspCharAtCall = Memory::Read_U8(0x803F0CC8u + 1u);
+              break;
+            case 0x8018F640u: // u64 Pad_GetDown(u8 port) -> r3:r4
+            {
+              const u32 port = cpu.gpr[3];
+              cpu.gpr[3] = 0;
+              cpu.gpr[4] = port < 4 ? padDownInputs[port] : 0;
+              break;
+            }
+            case 0x803901F0u: // GObj_Create
+              cpu.gpr[3] = nextGobj;
+              nextGobj += 0x40;
+              break;
+            case 0x80370E44u: // JOBJ_LoadJoint
+            {
+              Require(spawnedJobjCount < 4, "unexpected extra JOBJ_LoadJoint call");
+              const u32 root = 0x81400000u + spawnedJobjCount * 0x1000u;
+              setupSelectorTree(root);
+              spawnedJobjRoots[spawnedJobjCount++] = root;
+              cpu.gpr[3] = root;
+              break;
+            }
+            case 0x803D706Cu: // calloc(size)
+            case 0x8037F1E4u: // HSD_MemAlloc
+            {
+              const u32 sz = (cpu.gpr[3] + 15u) & ~15u;
+              const u32 ptr = heapBump;
+              heapBump += std::max(sz, 16u);
+              for (u32 off = 0; off < sz; off += 4) Memory::Write_U32(0, ptr + off);
+              cpu.gpr[3] = ptr;
+              break;
+            }
+            case 0x800055F0u: // ExiSlippi_Transfer
+            case 0x803732E8u: // JOBJ_SetMtxDirtySub
+            case 0x80371D9Cu: // JOBJ_SetFlagsAll
+            case 0x80390A70u: // GObj_AddObject
+            case 0x8039069Cu: // GObj_AddGXLink
+            case 0x8038FD54u: // GObj_AddProc
+            case 0x80390B68u: // GObj_AddUserData
+            case 0x8037F1B0u: // HSD_Free
+            case 0x80024030u: // SFX_PlayCommon
+            case 0x801C53ECu: // SFX_Play
+            case 0x8038CFF4u: // SFX_PlayRaw
+              break;
+            default:
+              stub = false;
+              break;
+          }
+          if (stub) { cpu.pc = cpu.spr[SPR_LR]; continue; }
+          Require(cpu.pc >= cssBase && cpu.pc < cssBase + codeLen,
+                  "SlippiCSS.dat branched to an unstubbed external address");
+          Require(Memory::Read_U32(cpu.pc) != 0, "SlippiCSS.dat reached zero instruction");
+          interp.SingleStepInner();
+          Require(cpu.Exceptions == 0, "PowerPC exception while executing SlippiCSS.dat");
+        }
+        throw std::runtime_error("SlippiCSS.dat exceeded instruction limit");
+      };
+
+      resetCpu();
+      Memory::Write_U32(0x02080000, 0x80479D30); // non-Online VS CSS
+      runDatHook(cssBase + fnOffsets[1], 0x80DEAD00u);
+      runDatHook(cssBase + fnOffsets[0], 0x80DEAD04u);
+      runDatHook(cssBase + fnOffsets[2], 0x80DEAD08u);
+      Require(capturedLoadR3 == 0x80DEAD00u && capturedThinkR3 == 0x80DEAD04u && capturedExitR3 == 0x80DEAD08u,
+              "SlippiCSS.dat clobbered minor_data (r3) passed to CSS_load/think/exit");
+
+      // Test B: Native Local Teams Online CSS InitSheikSelector + stc_css_exitkind + per-slot Zelda<->Sheik toggle.
+      loadAndRelocateDat();
+      resetCpu();
+      Memory::Write_U32(0x08000000, 0x80479D30); // MJRKIND_HANYUTESTCSS(8), MNRKIND_TITLE(0)
+      Memory::Write_U8(3, meleeR13 - 0x5060); // Online Teams mode (not Ranked)
+      Memory::Write_U32(Runner::Css, 0x80005614); // SLIPPI_CSS_DATA_REF->dt
+      Memory::Write_U32(Runner::Msrb, Runner::Css + 0x00);
+      Memory::Write_U32(Runner::Buffer, Runner::Css + 0x04); // SlpCSSDatAddress
+      Memory::Write_U32(0x81500000u, Runner::Buffer + 0x14); // slpCss->sheikSelector
+      Memory::Write_U8(1, Runner::Css + 0x1C + 9); // native = 1
+      Memory::Write_U8(3, Runner::Css + 0x1C + 32); // joinedMask = slots 0 & 1
+      Memory::Write_U8(1, Runner::Css + 0xA0); // CSSDT_NATIVE_INITIALIZED = 1
+      Memory::Write_U8(2, Runner::Css + 0xA1); // CSSDT_NATIVE_VISIBLE_COUNT = 2
+
+      // Card nameTexts[0..1] + origZ[0..1]
+      Memory::Write_U32(0x81510000u, Runner::Css + 0x1CC + 0);
+      Memory::Write_U32(0x81510100u, Runner::Css + 0x1CC + 4);
+      writeF32(0x81510000u + 0x00, -28.62f); writeF32(0x81510000u + 0x04, 17.55f);
+      writeF32(0x81510100u + 0x00, -10.62f); writeF32(0x81510100u + 0x04, 17.55f);
+      writeF32(Runner::Css + 0x1DC + 0, 0.0f);
+      writeF32(Runner::Css + 0x1DC + 4, 0.0f);
+
+      // CSSData (r13 - 0x49F0), CSSIcon[0] (0x803F0CC8), pucks[0..1], cursors[0..1]
+      Memory::Write_U32(Runner::SceneData, meleeR13 - 0x49F0);
+      Memory::Write_U8(0x12, Runner::SceneData + 0x70 + 0 * 36); // slot 0 = CKIND_ZELDA
+      Memory::Write_U8(0x12, Runner::SceneData + 0x70 + 1 * 36); // slot 1 = CKIND_ZELDA
+      Memory::Write_U8(0x12, 0x803F0CC8u + 1u);
+      for (u32 s = 0; s < 2; ++s)
+      {
+        const u32 puck = 0x81520000u + s * 0x40u;
+        const u32 cur = 0x81530000u + s * 0x40u;
+        Memory::Write_U32(puck, 0x804A0BD0u + 4u * s);
+        Memory::Write_U8(0, puck + 5); // placed (state == 0)
+        Memory::Write_U32(cur, 0x804A0BC0u + 4u * s);
+      }
+
+      spawnedJobjCount = 0;
+      capturedLoadR3 = 0;
+      runDatHook(cssBase + fnOffsets[1], 0x80BEEF00u); // minor_load
+      Require(capturedLoadR3 == 0x80BEEF00u, "minor_load lost minor_data on Online CSS");
+      Require(spawnedJobjCount == 2, "InitSheikSelector did not spawn 2 selectors for 2-player Native Local Teams");
+      const float expectedCx0 = -28.62f + 5.52f;
+      const float expectedCy0 = -17.55f - 3.10f;
+      Require(std::fabs(readF32(spawnedJobjRoots[0] + 0x38) - expectedCx0) < 0.01f &&
+                  std::fabs(readF32(spawnedJobjRoots[0] + 0x3C) - expectedCy0) < 0.01f &&
+                  std::fabs(readF32(spawnedJobjRoots[0] + 0x40) - 0.05f) < 0.001f &&
+                  std::fabs(readF32(spawnedJobjRoots[0] + 0x2C) - 1.5f) < 0.001f,
+              "InitSheikSelector placed or scaled slot 0 selector unexpectedly");
+
+      // Position cursor 0 over slot 0's Sheik button and press A while name entry is open.
+      writeF32(0x81530000u + 0x0C, expectedCx0 - 5.0f + 1.0f);
+      writeF32(0x81530000u + 0x10, expectedCy0 + 1.25f);
+      writeF32(0x81530040u + 0x0C, 30.0f);
+      writeF32(0x81530040u + 0x10, 30.0f);
+      padDownInputs = {{0x0100u, 0u, 0u, 0u}}; // HSD_BUTTON_A for slot 0
+
+      Memory::Write_U8(4, 0x804D6CF6u); // stc_css_exitkind = CSSEXIT_NAME (must NOT deref NULL)
+      runDatHook(cssBase + fnOffsets[0], 0x80BEEF04u);
+      Require(capturedThinkR3 == 0x80BEEF04u, "minor_think lost minor_data on Online CSS");
+      Require(Memory::Read_U8(Runner::SceneData + 0x70) == 0x12,
+              "UpdateSheikSelector ignored stc_css_exitkind or mutated character in name entry");
+
+      // Exit name entry (clears stc_css_exitkind -> triggers selector re-init on resume + A-press toggle on next think).
+      Memory::Write_U8(0, 0x804D6CF6u);
+      padDownInputs = {{0u, 0u, 0u, 0u}};
+      spawnedJobjCount = 0;
+      runDatHook(cssBase + fnOffsets[0], 0x80BEEF06u);
+      Require(spawnedJobjCount == 2, "UpdateSheikSelector did not re-init selectors on exit from name entry");
+
+      padDownInputs = {{0x0100u, 0u, 0u, 0u}};
+      runDatHook(cssBase + fnOffsets[0], 0x80BEEF08u);
+      Require(Memory::Read_U8(Runner::SceneData + 0x70 + 0 * 36) == 0x13 &&
+                  Memory::Read_U8(Runner::SceneData + 0x70 + 1 * 36) == 0x12,
+              "slot 0 click did not toggle Zelda (0x12) -> Sheik (0x13) independently of slot 1");
+      Require(capturedCspSlot == 0 && capturedCspCharAtCall == 0x13 &&
+                  Memory::Read_U8(0x803F0CC8u + 1u) == 0x13 && capturedAnnouncerChar == 0x13,
+              "SetSelectedCharForSlot failed to pass 0x13 to CSP update or restore CSSIcon char_kind to Sheik");
+      const u32 j0 = spawnedJobjRoots[0];
+      Require(std::fabs(readF32(j0 + 0x180 + 0x0C) - 1.0f) < 0.01f &&
+                  std::fabs(readF32(j0 + 0x380 + 0x0C) - 0.4f) < 0.01f &&
+                  std::fabs(readF32(j0 + 0x580 + 0x0C) - 1.0f) < 0.01f,
+              "Sheik selector root/child alphas mismatch after toggling to Sheik");
+      report << "PASS: deployed SlippiCSS.dat preserves minor_data (r3), resolves stc_css_exitkind, and toggles Native Local Teams Zelda/Sheik selectors independently\n";
+    }
   }
   catch (...) { Memory::Shutdown(); throw; }
   Memory::Shutdown();
