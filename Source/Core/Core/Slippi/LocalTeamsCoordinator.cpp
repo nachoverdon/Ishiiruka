@@ -102,9 +102,20 @@ std::array<u8, LocalTeams::StatusSize> LocalTeamsCoordinator::Poll(u8 mode, cons
   {
     state.PollJoining(reports, frame, !validated);
     state.Poll(buttons);
-    if (NativeCSS() && state.phase == LocalTeams::Phase::Selecting)
-      for (unsigned i = 0; i < state.count; ++i)
-        if (state.InputEnabled(i) && (buttons[state.ports[i]] & 0x200)) state.UnreadyPlayer(i);
+    if (NativeCSS())
+    {
+      if (state.phase == LocalTeams::Phase::Selecting)
+      {
+        const u16 unreadyMask = validated ? 0x200u : 0x210u; // B always; Z also unreadies only that player before connecting
+        for (unsigned i = 0; i < state.count; ++i)
+          if (state.InputEnabled(i) && (buttons[state.ports[i]] & unreadyMask)) state.UnreadyPlayer(i);
+      }
+      else if (!validated && state.phase == LocalTeams::Phase::EnteringCode)
+      {
+        for (unsigned i = 0; i < state.count; ++i)
+          if (state.InputEnabled(i) && (buttons[state.ports[i]] & 0x10u)) state.UnreadyPlayer(i);
+      }
+    }
     if (returnedFromGame) published = false;
   }
   result = {{1, u8(state.count), u8(state.active), u8(state.ports[state.active]), u8(state.confirmed),

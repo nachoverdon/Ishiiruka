@@ -559,8 +559,33 @@ int RunLocalTeamsSelfTest(const std::string& reportPath)
       const u8 held[8] = {0x10,0,0,0,0x10,0,0,0};
       status = ui.Poll(SlippiMatchmaking::TEAMS, held);
       Require(status[4] == 0 && status[10] == 0 && !ui.Confirm(first, 100), "held Start readied rematch player automatically");
+
+      // Disconnected Z unready tests: Selecting and EnteringCode unready only the pressing player.
+      LocalTeamsCoordinator zTest(0, nullptr, [] { return u16(0x8); });
+      zTest.Poll(u8(SlippiMatchmaking::TEAMS | 0x80), buttons);
+      zTest.Poll(SlippiMatchmaking::TEAMS, buttons);
+      Require(zTest.Confirm(first, 100) && zTest.Confirm(second, 200), "both players failed to ready for Z unready test");
+      Require(zTest.state.phase == LocalTeams::Phase::EnteringCode && zTest.state.confirmed == 3,
+              "Z unready test did not enter EnteringCode with both players confirmed");
+      const u8 zP1[8] = {0, 0x10, 0, 0, 0, 0, 0, 0};
+      status = zTest.Poll(SlippiMatchmaking::TEAMS, zP1);
+      Require(status[4] == 2 && status[5] == u8(LocalTeams::Phase::Selecting),
+              "Z in EnteringCode did not unready only P1 and return to Selecting");
+      const u8 zP2[8] = {0, 0, 0, 0, 0, 0x10, 0, 0};
+      zTest.Poll(SlippiMatchmaking::TEAMS, buttons);
+      Require(zTest.Confirm(first, 100) && zTest.state.confirmed == 3, "re-confirming P1 failed");
+      zTest.state.phase = LocalTeams::Phase::Selecting;
+      status = zTest.Poll(SlippiMatchmaking::TEAMS, zP2);
+      Require(status[4] == 1 && status[5] == u8(LocalTeams::Phase::Selecting),
+              "Z while disconnected in Selecting did not unready only P2");
+      zTest.validated = true;
+      status = zTest.Poll(SlippiMatchmaking::TEAMS, zP1);
+      Require(status[4] == 1, "connected Z in Selecting unreadied a player instead of leaving B to unready");
+      const u8 bP1[8] = {0x02, 0, 0, 0, 0, 0, 0, 0};
+      status = zTest.Poll(SlippiMatchmaking::TEAMS, bP1);
+      Require(status[4] == 0, "connected B in Selecting failed to unready P1");
     }
-    report << "PASS: native two-player coordinator, independent ready/unready, persistent rematch choices and keyboard return/rearm guards\n";
+    report << "PASS: native two-player coordinator, independent ready/unready (including disconnected Z), persistent rematch choices and keyboard return/rearm guards\n";
     {
       File::WriteStringToFile("[LocalTeams]\nEnabled=True\nCount=1\nBasePort=49120\n",File::GetUserPath(D_CONFIG_IDX)+"local-teams.ini");
       LocalTeamsCoordinator join(0,nullptr, [] { return u16(0x8); });

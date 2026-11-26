@@ -403,6 +403,16 @@ void Run(const std::string& directory, std::ofstream& report)
       tick();
       Require(hold.packets.size()==1 && hold.packets[0][0]==css.Symbol("CONST_SlippiCmdCleanupConnections"),"49-frame Z hold failed to disconnect local group");
     }
+    {
+      Runner idleZ(css); idleZ.Status(2,0,0);
+      Memory::Write_U8(1,Runner::Css+css.Symbol("CSSDT_LOCAL_TEAMS_STATUS")+9);
+      Memory::Write_U8(u8(css.Symbol("MM_STATE_IDLE")),Runner::Msrb);
+      Memory::Write_U32(0x01020304,Runner::Css+css.Symbol("CSSDT_NATIVE_Z_TIMERS"));
+      PowerPC::ppcState.gpr[7]=0x10;
+      idleZ.Run(Elf::Base,exits);
+      Require(idleZ.packets.empty(),"idle Z press sent connection cleanup instead of letting Dolphin unready only the pressing player");
+      Require(Memory::Read_U32(Runner::Css+css.Symbol("CSSDT_NATIVE_Z_TIMERS"))==0,"idle Z did not clear native hold timers");
+    }
     for(unsigned connection : {css.Symbol("MM_STATE_MATCHMAKING"),css.Symbol("MM_STATE_OPPONENT_CONNECTING"),css.Symbol("MM_STATE_ERROR_ENCOUNTERED")})
     {
       Runner cancel(css); cancel.Status(2,0,1);
@@ -411,7 +421,7 @@ void Run(const std::string& directory, std::ofstream& report)
       cancel.Run(Elf::Base,exits);
       Require(cancel.packets.size()==1 && cancel.packets[0][0]==css.Symbol("CONST_SlippiCmdCleanupConnections"),"search/error cancellation no longer matches stock press-Z behavior");
     }
-    report << "PASS: connected Z uses stock 49-frame hold for each local, resets on release; searching/connecting/error use stock press-Z cancellation\n";
+    report << "PASS: connected Z uses stock 49-frame hold; idle Z does not cancel all players; searching/connecting/error cancel normally\n";
     {
       Runner game(input);
       auto& cpu = PowerPC::ppcState;
@@ -571,7 +581,8 @@ void Run(const std::string& directory, std::ofstream& report)
               input.Symbol("CSSDT_NATIVE_ORIGINAL_Y")==0x1F0 && input.Symbol("CSSDT_NATIVE_ORIGINAL_SX")==0x220 &&
               input.Symbol("CSSDT_NATIVE_ORIGINAL_SY")==0x250 && input.Symbol("CSSDT_NATIVE_PIVOT_DX")==0x280 &&
               input.Symbol("CSSDT_NATIVE_PIVOT_DY")==0x2B0 &&
-              input.Symbol("CSSDT_SIZE")==0x2E0 && input.Symbol("CSS_SAVED_CURSORS_ADDR")==0x80005620,
+              input.Symbol("CSSDT_NATIVE_TEAM_TOP_Y")==0x2E0 && input.Symbol("CSSDT_NATIVE_TEAM_BOT_Y")==0x2F0 &&
+              input.Symbol("CSSDT_SIZE")==0x300 && input.Symbol("CSS_SAVED_CURSORS_ADDR")==0x80005620,
               "CSSDT layout or static saved-cursor address shifted unexpectedly");
       Require(Memory::Read_U8(Runner::Css + input.Symbol("CSSDT_CONNECTED_PADS")) == 0x0F,
               "TriggerSendInput did not record all four connected pads before remapping");
@@ -700,6 +711,8 @@ void Run(const std::string& directory, std::ofstream& report)
     report << "PASS: all four mode-entry/gameplay source ports and real hand/token port labels, preserving card ownership and team colors\n";
     // Keyboard confirmation can leave an A edge on the frame CSS resumes.
     // The saved first-game pick must agree with the menu's team for rematches.
+    auto writeFloat = [](float value, u32 address) { u32 bits; std::memcpy(&bits,&value,4); Memory::Write_U32(bits,address); };
+    auto readFloat = [](u32 address) { const auto bits=Memory::Read_U32(address); float value; std::memcpy(&value,&bits,4); return value; };
     for (bool native : {false, true})
     for (bool own : {false, true})
     for (unsigned player = 0; player < 4; ++player)
@@ -714,15 +727,53 @@ void Run(const std::string& directory, std::ofstream& report)
       Memory::Write_U8(u8(keyboard), Runner::R13 - 0x49AA);
       PowerPC::ppcState.gpr[31]=Runner::Buffer;
       Memory::Write_U8(u8(player), Runner::Buffer+4);
-      PowerPC::ppcState.gpr[25]=0x803F0DFC + 36 * (own ? player : (player + 1) % 4);
+      writeFloat(-28.1f, Runner::Buffer + 0x0C);
+      writeFloat(-3.4f, Runner::Buffer + 0x10);
+      const u32 targetDoor = 0x803F0DFC + 36 * (own ? player : (player + 1) % 4);
+      PowerPC::ppcState.gpr[25] = targetDoor;
+      writeFloat(-35.35f, targetDoor + 0x1C);
+      writeFloat(-20.85f, targetDoor + 0x20);
+      writeFloat(-0.35f, Runner::Css + nativeTeam.Symbol("CSSDT_NATIVE_TEAM_TOP_Y") + 4 * player);
+      writeFloat(-16.39f, Runner::Css + nativeTeam.Symbol("CSSDT_NATIVE_TEAM_BOT_Y") + 4 * player);
       const auto end = Elf::Base + u32(nativeTeam.text.size());
-      const bool editable = !native || (own && phase == 0 && keyboard == 0 && !(confirmed & (1u << player)));
-      Require(team.Run(Elf::Base,{end,0x80261BFC}) == (editable ? end : 0x80261BFC),
+      const bool editable = own && phase == 0 && keyboard == 0 && !(confirmed & (1u << player));
+      const u32 expected = !native ? end : (editable ? 0x80261BBCu : 0x80261BFCu);
+      Require(team.Run(Elf::Base,{end,0x80261BBC,0x80261BFC}) == expected,
               "team button accepted a keyboard/locked-player click or blocked an editable selection");
     }
-    report << "PASS: native team buttons reject keyboard, search and ready clicks; unready players retain their own team controls\n";
-    auto writeFloat = [](float value, u32 address) { u32 bits; std::memcpy(&bits,&value,4); Memory::Write_U32(bits,address); };
-    auto readFloat = [](u32 address) { const auto bits=Memory::Read_U32(address); float value; std::memcpy(&value,&bits,4); return value; };
+    for (unsigned player = 0; player < 4; ++player)
+    {
+      const struct { float x; float y; bool hit; } cases[] = {
+          {-35.20f, -0.50f, true},   // top-left interior
+          {-21.00f, -16.20f, true},  // bottom-right just above displayName
+          {-35.35f, -3.40f, false},  // left boundary (excluded like stock <)
+          {-20.85f, -3.40f, false},  // right boundary
+          {-28.10f, -0.35f, false},  // card top boundary
+          {-28.10f, 0.50f, false},   // above card
+          {-28.10f, -16.39f, false}, // displayName top boundary
+          {-28.10f, -18.50f, false}, // over displayName / Sheik selector
+      };
+      for (const auto& c : cases)
+      {
+        Runner team(nativeTeam); team.Status(4, 0, 0);
+        Memory::Write_U8(1, Runner::Css + nativeTeam.Symbol("CSSDT_LOCAL_TEAMS_STATUS") + 9);
+        PowerPC::ppcState.gpr[31] = Runner::Buffer;
+        Memory::Write_U8(u8(player), Runner::Buffer + 4);
+        writeFloat(c.x, Runner::Buffer + 0x0C);
+        writeFloat(c.y, Runner::Buffer + 0x10);
+        const u32 door = 0x803F0DFC + 36 * player;
+        PowerPC::ppcState.gpr[25] = door;
+        writeFloat(-35.35f, door + 0x1C);
+        writeFloat(-20.85f, door + 0x20);
+        writeFloat(-0.35f, Runner::Css + nativeTeam.Symbol("CSSDT_NATIVE_TEAM_TOP_Y") + 4 * player);
+        writeFloat(-16.39f, Runner::Css + nativeTeam.Symbol("CSSDT_NATIVE_TEAM_BOT_Y") + 4 * player);
+        const auto end = Elf::Base + u32(nativeTeam.text.size());
+        const u32 reached = team.Run(Elf::Base, {end, 0x80261BBC, 0x80261BFC});
+        Require(reached == (c.hit ? 0x80261BBCu : 0x80261BFCu),
+                "native team button 2D card hitbox did not span card width and card top to displayName top");
+      }
+    }
+    report << "PASS: native team buttons reject keyboard/locked clicks and match full scaled card width from card top to displayName top\n";
     for(unsigned count : {1u,2u,3u,4u})
     for(bool waiting : {false,true})
     {
@@ -802,9 +853,31 @@ void Run(const std::string& directory, std::ofstream& report)
                 "native CSS cursor visibility did not match claimed cards");
       for(unsigned player=0;player<count;++player)
         Require(Memory::Read_U8(0x81203000+player*0x100+7)==40,"first visible token can retain the wrong adapter-port label");
-      const float expectedTeamLeft1 = count == 2 ? -8.8f : count == 3 ? -18.25f : -22.6408f;
-      if (count >= 2) Require(std::abs(readFloat(0x803F0DFC + 36 + 0x1C) - expectedTeamLeft1) < 0.01f,
-                              "scaled panel team hitbox did not move/scale with its card center");
+      const float expectedScalesFallback[4] = {1.0f, 1.0f, 0.70f, 0.53f};
+      const float expectedShiftsFallback[4][4] = {
+          {0.0f, 0.0f, 0.0f, 0.0f},
+          {0.0f, 2.6f, 5.2f, 7.8f},
+          {-2.175f, -6.4f, -10.625f, 0.0f},
+          {-3.4075f, -10.5358f, -17.6642f, -24.7925f},
+      };
+      const float expectedPortYOffsFallback[4] = {-1.80f, -1.80f, -1.65f, -1.55f};
+      for (unsigned player = 0; player < count; ++player)
+      {
+        const float s = expectedScalesFallback[count - 1];
+        const float cursorCx = (-23.1f + player * 15.4f) + expectedShiftsFallback[count - 1][player] - 5.0f;
+        const float halfW = 7.25f * s;
+        const float expectedTopY = -(3.4f + expectedPortYOffsFallback[count - 1]) + 1.25f;
+        const float expectedBotY = -(3.4f + 14.24f * s) + 1.25f;
+        Require(std::abs(readFloat(0x803F0DFC + 36 * player + 0x1C) - (cursorCx - halfW)) < 0.01f &&
+                    std::abs(readFloat(0x803F0DFC + 36 * player + 0x20) - (cursorCx + halfW)) < 0.01f &&
+                    std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_TEAM_TOP_Y") + 4 * player) - expectedTopY) < 0.01f &&
+                    std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_TEAM_BOT_Y") + 4 * player) - expectedBotY) < 0.01f,
+                "scaled panel team hitbox did not span cursor-space card width and card top to displayName top");
+      }
+      if (count >= 2)
+        Require(std::abs(readFloat(0x803F0DFC + 0x1C) - (-35.35f)) < 0.01f &&
+                    std::abs(readFloat(0x803F0DFC + 36 * (count - 1) + 0x20) - (-2.85f)) < 0.01f,
+                "outer scaled card team hitboxes did not align with left/right container edges");
       for (unsigned player = 0; player + 1 < count; ++player)
         Require(readFloat(0x803F0DFC + 36 * player + 0x20) < readFloat(0x803F0DFC + 36 * (player + 1) + 0x1C),
                 "adjacent scaled cards had overlapping team button hitboxes");
@@ -1066,6 +1139,12 @@ void Run(const std::string& directory, std::ofstream& report)
               "unused 4th card text slot was not left cleared");
       const float expectedPortYOffs[4] = {-1.80f, -1.80f, -1.65f, -1.55f};
       const float expectedScales[4] = {1.0f, 1.0f, 0.70f, 0.53f};
+      const float expectedShiftsCard[4][4] = {
+          {0.0f, 0.0f, 0.0f, 0.0f},
+          {0.0f, 2.6f, 5.2f, 7.8f},
+          {-2.175f, -6.4f, -10.625f, 0.0f},
+          {-3.4075f, -10.5358f, -17.6642f, -24.7925f},
+      };
       for (unsigned count : {1u, 2u, 3u, 4u})
       {
         cards.Status(count, 0);
@@ -1078,10 +1157,21 @@ void Run(const std::string& directory, std::ofstream& report)
           const u32 portText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_PORT_TEXTS") + card * 4);
           const u32 nameText = Memory::Read_U32(Runner::Css + nativeInit.Symbol("CSSDT_CARD_NAME_TEXTS") + card * 4);
           const float anchorTy = 19.0f - 14.1f;
+          const float refX = -26.0f + card * 15.4f;
+          const float s = expectedScales[count - 1];
+          const float cursorCx = (refX + 4.64f + expectedShiftsCard[count - 1][card]) - 5.0f;
+          const float halfW = 7.25f * s;
           Require(std::abs(readFloat(portText + 0x04) - (anchorTy + expectedPortYOffs[count - 1])) < 0.001f,
                   "per-count card P# vertical offset is incorrect");
-          Require(std::abs(readFloat(nameText + 0x04) - (anchorTy + 14.24f * expectedScales[count - 1])) < 0.001f,
+          Require(std::abs(readFloat(nameText + 0x04) - (anchorTy + 14.24f * s)) < 0.001f,
                   "per-count card displayName vertical offset changed unexpectedly");
+          Require(std::abs(readFloat(0x803F0DFC + 36 * card + 0x1C) - (cursorCx - halfW)) < 0.01f &&
+                      std::abs(readFloat(0x803F0DFC + 36 * card + 0x20) - (cursorCx + halfW)) < 0.01f &&
+                      std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_TEAM_TOP_Y") + 4 * card) -
+                               (-(anchorTy + expectedPortYOffs[count - 1]) + 1.25f)) < 0.01f &&
+                      std::abs(readFloat(Runner::Css + nativeInit.Symbol("CSSDT_NATIVE_TEAM_BOT_Y") + 4 * card) -
+                               (-(anchorTy + 14.24f * s) + 1.25f)) < 0.01f,
+                  "per-count refText team hitbox bounds did not match card top to displayName top");
         }
       }
     }

@@ -280,7 +280,16 @@ public:
   }
   void UnreadyPlayer(unsigned player)
   {
-    if (player < count && phase == Phase::Selecting) confirmed &= ~(1u << player);
+    if (player >= count) return;
+    if (phase == Phase::Selecting)
+    {
+      confirmed &= ~(1u << player);
+    }
+    else if (phase == Phase::EnteringCode && (confirmed & (1u << player)))
+    {
+      confirmed &= ~(1u << player);
+      phase = Phase::Selecting;
+    }
   }
   bool AcceptFrame(std::int32_t frame)
   {
